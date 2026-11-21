@@ -1,0 +1,75 @@
+# Nombre interno del proyecto.
+# Se conserva para mantener las referencias que ya utiliza el código.
+name: spooky_mobile
+
+# Describe el propósito de la aplicación.
+description: "Cruppis: aplicación móvil de reseñas de películas y series de terror."
+
+# Evita publicar este proyecto como paquete en pub.dev.
+publish_to: 'none'
+
+# Versión de la aplicación y número de compilación.
+# 1.0.0 es la versión y +1 es el número de compilación.
+version: 1.0.0+1
+
+environment:
+  # Versiones de Dart compatibles: desde 3.13.4 hasta antes de 4.0.0.
+  sdk: ^3.13.4
+
+# Librerías que utiliza la aplicación.
+dependencies:
+  # Incluye las herramientas principales de Flutter.
+  flutter:
+    sdk: flutter
+
+  # Incluye iconos con el estilo de iOS.
+  cupertino_icons: ^1.0.8
+
+  # Permite consultar la API y enviar datos al backend.
+  http: ^1.6.0
+
+  # Permite seleccionar fotografías desde el dispositivo.
+  image_picker: ^1.2.4
+
+  # Permite guardar el token en el almacenamiento protegido del teléfono.
+  flutter_secure_storage: ^10.0.0
+
+# Herramientas utilizadas durante el desarrollo.
+dev_dependencies:
+  # Permite realizar pruebas del código y de los componentes de Flutter.
+  flutter_test:
+    sdk: flutter
+
+  # Ayuda a detectar problemas y mantener un estilo de código consistente.
+  flutter_lints: ^6.0.0
+
+  # Genera los archivos del icono con el que se instala la aplicación.
+  flutter_launcher_icons: ^0.14.4
+
+flutter:
+  # Permite utilizar los iconos de Material incluidos en Flutter.
+  uses-material-design: true
+
+  # Imágenes que se incluyen dentro de la aplicación.
+  assets:
+    - assets/imagenes/logo_cruppis.png
+
+# Configuración para generar el icono de Cruppis.
+flutter_launcher_icons:
+  # Genera los iconos de Android.
+  android: true
+
+  # No genera los iconos de iOS.
+  ios: false
+
+  # Imagen utilizada para el icono.
+  image_path: "assets/imagenes/logo_cruppis.png"
+
+  # Fondo del icono adaptable de Android.
+  adaptive_icon_background: "#090810"
+
+  # Imagen que se coloca sobre ese fondo.
+  adaptive_icon_foreground: "assets/imagenes/logo_cruppis.png"
+
+  # Añade un margen alrededor del logo para reducir el recorte.
+  adaptive_icon_foreground_inset: 16
