@@ -5,7 +5,7 @@ conexion = pymysql.connect(
     host="localhost",
     user="root",
     password="",
-    database="terror_db",
+    database="crupis",
     charset="utf8mb4"
 )
 
@@ -16,7 +16,7 @@ with conexion.cursor() as cursor:
 
 conexion.close()
 
-print("Conexión correcta con terror_db.")
+print("Conexión correcta a crupis.")
 print("Tablas encontradas:")
 
 for tabla in tablas:
