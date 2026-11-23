@@ -2,14 +2,25 @@
 // Permite cambiar nombre, correo y fotografía. La foto es opcional.
 // Elegir o quitar una foto modifica la vista previa; el cambio se confirma al guardar.
 // El rol se muestra como información y no se puede editar desde este formulario.
-
-// Permite enviar las credenciales como JSON y leer la respuesta de la API.
+// StatefulWidget permite actualizar el contenido; State conserva los datos de la pantalla.
+// Future representa un resultado pendiente; async y await permiten esperar sin bloquear la interfaz.
+// GlobalKey permite validar el Form; TextEditingController permite leer y preparar sus campos.
+// Map reúne campos por nombre; dynamic admite valores de distintos tipos.
+// ValueChanged es una función que recibe el nuevo dato y no devuelve un valor.
+// onActualizado comunica el perfil confirmado a la pantalla que abrió esta sección.
+// setState pide actualizar la interfaz; mounted comprueba si la pantalla sigue activa.
+// null indica ausencia de valor; ?? elige la alternativa si falta el primero.
+// final impide reasignar una variable y const define valores constantes.
+// MultipartRequest envía el nombre, el correo y el archivo en la misma solicitud.
+// try intenta la operación, catch atiende errores y finally cierra el cliente y libera indicadores.
+// Una silueta sin foto es parte de la interfaz; no representa una cuenta o fotografía de prueba.
+// Permite leer las respuestas JSON del perfil y conservar correctamente sus caracteres.
 import 'dart:convert';
 // Permite mostrar un archivo de imagen del teléfono. Este archivo está pensado para la app móvil, no para Flutter web.
 import 'dart:io';
 // Incluye los componentes de la pantalla, los formularios y la navegación.
 import 'package:flutter/material.dart';
-// Permite enviar la solicitud de inicio de sesión a la API.
+// Permite consultar el perfil y enviar sus cambios a la API.
 import 'package:http/http.dart' as http;
 // Permite seleccionar una fotografía desde la galería del teléfono.
 import 'package:image_picker/image_picker.dart';
@@ -40,7 +51,7 @@ class PerfilPage extends StatefulWidget {
 // Reúne los datos y las acciones de la pantalla de perfil.
 class _PerfilPageState extends State<PerfilPage> {
   // Dirección de la API. Debe actualizarse si cambia la IPv4 de la computadora.
-  static const String _servidor = 'http://192.168.1.65:8000';
+  static const String _servidor = 'http://10.13.40.223:8000';
   // Permite revisar el nombre y el correo antes de guardar.
   final _formulario = GlobalKey<FormState>();
   // Controla el nombre que se muestra y se modifica en el formulario.
@@ -172,7 +183,7 @@ class _PerfilPageState extends State<PerfilPage> {
           .timeout(const Duration(seconds: 20));
       // Evita actualizar la interfaz si el widget se cerró mientras se esperaba una operación.
       if (!mounted) return;
-      // Informa que el servidor no confirmó el inicio de sesión.
+      // Informa si la API no pudo devolver el perfil solicitado.
       if (respuesta.statusCode != 200) {
         // Actualiza los valores y refleja el cambio en la pantalla.
         setState(() {
@@ -200,7 +211,7 @@ class _PerfilPageState extends State<PerfilPage> {
         _errorCarga =
             'No se pudo cargar tu perfil. Comprueba la conexión.';
       });
-    // Termina el estado de carga tanto si se aceptó el acceso como si ocurrió un error.
+    // Termina esta operación y libera su indicador, tanto si tuvo éxito como si falló.
     } finally {
       // Comprueba que el perfil siga abierto antes de actualizar su contenido.
       if (mounted) {
@@ -212,34 +223,58 @@ class _PerfilPageState extends State<PerfilPage> {
       }
     }
   }
-  // Acepta una dirección completa, una ruta de portadas o un nombre de archivo para mostrar la fotografía.
+  // Solo admite fotografías de /portadas/ en el backend actual, no enlaces externos.
   String _urlFoto(String valor) {
-    // Retira los espacios sobrantes de la referencia de imagen.
+    // ?? utiliza texto vacío cuando no hay una foto; no crea una imagen de prueba.
     final foto = valor.trim();
-    // Si no hay fotografía, devuelve una dirección vacía; la tarjeta dispone de un icono de respaldo.
     if (foto.isEmpty) return '';
-    // Intenta interpretar el texto como una URI; devuelve null si no se puede analizar.
+
+    // Uri separa una dirección en protocolo, servidor, puerto y ruta.
+    final base = Uri.parse(_servidor);
     final uri = Uri.tryParse(foto);
-    // Comprueba si se pudo interpretar la dirección y si utiliza HTTP o HTTPS.
-    if (uri != null &&
-        // Acepta direcciones completas tanto HTTP como HTTPS; esto no comprueba que la imagen exista.
-        (uri.scheme == 'http' || uri.scheme == 'https')) {
-      // Conserva la dirección completa que ya proporcionó el servidor.
-      return foto;
+    if (uri == null) return '';
+
+    String ruta;
+    if (uri.hasScheme) {
+      // Una dirección completa debe pertenecer a nuestro backend.
+      // Las fotos de uploads se consultan públicamente mediante /portadas/.
+      if (uri.scheme != base.scheme ||
+          uri.host != base.host ||
+          uri.port != base.port ||
+          uri.userInfo.isNotEmpty ||
+          uri.hasQuery ||
+          uri.hasFragment ||
+          !uri.path.startsWith('/portadas/')) {
+        return '';
+      }
+      ruta = uri.path;
+    } else {
+      ruta = foto;
     }
-    // Reconoce las rutas de fotografías que ya incluyen el directorio portadas.
-    if (foto.startsWith('/portadas/') ||
-        // También acepta esa ruta aunque no tenga una barra inicial.
-        foto.startsWith('portadas/')) {
-      // Completa la ruta relativa con la dirección del servidor.
-      return Uri.parse('$_servidor/').resolve(foto).toString();
+
+    // Retira el prefijo local para conservar únicamente el nombre del archivo.
+    String nombre = ruta;
+    for (final prefijo in ['/portadas/', 'portadas/']) {
+      if (ruta.startsWith(prefijo)) {
+        nombre = ruta.substring(prefijo.length);
+        break;
+      }
     }
-    // Construye una dirección dentro de /portadas cuando solo se recibió un nombre de archivo.
-    return Uri.parse(_servidor).replace(
-      // Añade los componentes de la ruta y deja que Uri codifique los caracteres que lo necesiten.
-      pathSegments: ['portadas', foto],
-    ).toString();
+
+    // Rechaza nombres vacíos y rutas hacia otras carpetas.
+    if (nombre.isEmpty ||
+        nombre == '.' ||
+        nombre == '..' ||
+        nombre.contains('/') ||
+        nombre.contains(String.fromCharCode(92)) ||
+        nombre.contains(':')) {
+      return '';
+    }
+
+    // replace construye la ruta; pathSegments codifica el nombre del archivo.
+    return base.replace(pathSegments: ['portadas', nombre]).toString();
   }
+
   // Abre la galería, comprueba el tamaño y prepara una fotografía nueva sin guardarla todavía en el servidor.
   Future<void> _seleccionarFoto() async {
     // Evita iniciar otra operación mientras se guarda o se selecciona una imagen.
@@ -291,7 +326,7 @@ class _PerfilPageState extends State<PerfilPage> {
         _errorGuardar = 'No se pudo seleccionar la fotografía. '
             'Usa una imagen JPG, PNG o WEBP de hasta 5 MB.';
       });
-    // Termina el estado de carga tanto si se aceptó el acceso como si ocurrió un error.
+    // Termina esta operación y libera su indicador, tanto si tuvo éxito como si falló.
     } finally {
       // Comprueba que el perfil siga abierto antes de actualizar su contenido.
       if (mounted) {
@@ -385,7 +420,7 @@ class _PerfilPageState extends State<PerfilPage> {
       })().timeout(const Duration(seconds: 30));
       // Evita actualizar la interfaz si el widget se cerró mientras se esperaba una operación.
       if (!mounted) return;
-      // Informa que el servidor no confirmó el inicio de sesión.
+      // Informa si la API no pudo devolver el perfil solicitado.
       if (respuesta.statusCode != 200) {
         // Actualiza los valores y refleja el cambio en la pantalla.
         setState(() {
@@ -429,7 +464,7 @@ class _PerfilPageState extends State<PerfilPage> {
         _errorGuardar = 'No se pudo confirmar el guardado. '
             'Vuelve a abrir tu perfil para comprobar los cambios.';
       });
-    // Termina el estado de carga tanto si se aceptó el acceso como si ocurrió un error.
+    // Termina esta operación y libera su indicador, tanto si tuvo éxito como si falló.
     } finally {
       // Libera los recursos del cliente HTTP al terminar la operación.
       cliente.close();
@@ -455,6 +490,8 @@ class _PerfilPageState extends State<PerfilPage> {
     );
     // Copia la referencia a una variable local para comprobar si es nula.
     final seleccion = _fotoSeleccionada;
+    // Valida la referencia de la foto guardada antes de mostrarla.
+    final urlActual = _urlFoto(_fotoActual);
     // Comienza con el icono de respaldo y lo sustituye si hay una imagen disponible.
     Widget imagen = icono;
     // No intenta mostrar una fotografía cuando se ha solicitado retirarla.
@@ -474,10 +511,10 @@ class _PerfilPageState extends State<PerfilPage> {
           },
         );
       // Si no hay una foto nueva, intenta mostrar la que está guardada en la cuenta.
-      } else if (_fotoActual.isNotEmpty) {
+      } else if (urlActual.isNotEmpty) {
         // Carga la fotografía actual desde su dirección en el servidor.
         imagen = Image.network(
-          _urlFoto(_fotoActual),
+          urlActual,
           // Llena el marco de la fotografía manteniendo su proporción y recortando lo que sobra.
           fit: BoxFit.cover,
           // Construye una alternativa visual cuando la imagen no se puede cargar.
@@ -615,16 +652,16 @@ class _PerfilPageState extends State<PerfilPage> {
                     maxLength: 100,
                     // Sugiere al teclado iniciar cada palabra con mayúscula; no transforma obligatoriamente el texto.
                     textCapitalization: TextCapitalization.words,
-                    // Muestra la acción de finalizar en el teclado.
+                    // Muestra la acción para pasar al siguiente campo.
                     textInputAction: TextInputAction.next,
                     // Quita el foco al tocar fuera del campo.
                     onTapOutside: (_) {
                       // Cierra el teclado antes de continuar con la acción.
                       FocusScope.of(context).unfocus();
                     },
-                    // Aplica el fondo, el borde y la sombra definidos en los estilos compartidos.
+                    // Configura la etiqueta y el aspecto del campo con el tema de Cruppis.
                     decoration: const InputDecoration(
-                      // Etiqueta que identifica el campo del nombre.
+                      // Etiqueta que identifica el dato solicitado en este campo.
                       labelText: 'Nombre',
                       prefixIcon: Icon(Icons.person_outline),
                     ),
@@ -661,15 +698,17 @@ class _PerfilPageState extends State<PerfilPage> {
                       // Permite intentar guardar desde la acción de finalizar del teclado.
                       _guardarPerfil();
                     },
-                    // Aplica el fondo, el borde y la sombra definidos en los estilos compartidos.
+                    // Configura la etiqueta y el aspecto del campo con el tema de Cruppis.
                     decoration: const InputDecoration(
-                      // Etiqueta que identifica el campo del nombre.
+                      // Etiqueta que identifica el dato solicitado en este campo.
                       labelText: 'Correo electrónico',
                       prefixIcon: Icon(Icons.email_outlined),
                     ),
                     // Revisa el valor antes de enviar los cambios a la API.
                     validator: (valor) {
-                      // Prepara el correo para comprobar que no esté vacío y que incluya una arroba.
+                      // Elimina espacios exteriores antes de validar el correo.
+                      // RegExp describe el formato; ^ y $ marcan el inicio y el final del texto.
+                      // En esta cadena r, \. representa el punto literal del dominio.
                       final correo = (valor ?? '').trim();
                       if (!RegExp(
                         r'^[^@\s]+@[^@\s]+\.[^@\s]+$',
