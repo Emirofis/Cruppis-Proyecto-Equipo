@@ -1,7 +1,21 @@
 // CRUPPIS — Formulario para publicar y editar reseñas.
 // Carga directores y actores, revisa los campos y envía el formulario a la API.
-// La portada es opcional: el backend conserva la actual o utiliza la predeterminada.
-
+// StatefulWidget permite actualizar el formulario; State guarda sus datos e indicadores.
+// Future es un resultado pendiente; async y await permiten esperar sin bloquear la pantalla.
+// Future.wait espera varias consultas y conserva el orden en que se escribieron.
+// Map agrupa campos por nombre; List reúne registros y dynamic permite distintos tipos de valores.
+// late indica que la variable se preparará antes de utilizarla; final impide reasignarla.
+// null representa un valor ausente; ?? utiliza la alternativa indicada cuando falta el dato.
+// setState pide actualizar la interfaz; mounted comprueba que la pantalla siga activa.
+// GlobalKey permite acceder al Form para ejecutar sus validadores antes de guardar.
+// JSON es el formato de respuesta de la API; UTF-8 conserva acentos y otros caracteres.
+// MultipartRequest envía campos de texto y un archivo juntos; POST registra y PUT actualiza.
+// split divide el texto; trim quita espacios exteriores y join une los valores.
+// toSet reúne valores sin repetirlos; contains comprueba si un ID pertenece al conjunto.
+// runes.length cuenta puntos de código Unicode; utf8.encode mide el texto en bytes.
+// condición ? opción : otraOpción elige un valor; onPressed: null desactiva un botón.
+// La portada es opcional: al editar se conserva la actual si no se elige otra.
+// Una reseña nueva sin imagen queda sin portada; no se asigna una imagen de prueba.
 // Permite convertir las respuestas JSON a datos de Dart y decodificar el texto UTF-8.
 import 'dart:convert';
 // Permite mostrar un archivo de imagen del teléfono. Este archivo está pensado para la app móvil, no para Flutter web.
@@ -35,7 +49,7 @@ class FormularioResenaPage extends StatefulWidget {
 // Reúne los datos del formulario y las acciones necesarias para consultar y guardar en la API.
 class _FormularioResenaPageState extends State<FormularioResenaPage> {
   // Dirección de la API en la computadora. Hay que actualizarla si cambia su IPv4.
-  static const _servidor = 'http://192.168.1.65:8000';
+  static const _servidor = 'http://10.13.40.223:8000';
   // Permite acceder al estado del Form y ejecutar sus validadores.
   final _formulario = GlobalKey<FormState>();
   // Crea el selector de imágenes que abre la galería.
@@ -148,7 +162,7 @@ class _FormularioResenaPageState extends State<FormularioResenaPage> {
     }
     // Decodifica los bytes como UTF-8 para conservar acentos y convierte el JSON en datos de Dart.
     final datos = jsonDecode(utf8.decode(respuesta.bodyBytes));
-    // Comprueba que la respuesta sea una lista antes de convertir los actores.
+    // Comprueba que la respuesta sea una lista antes de convertir sus registros.
     if (datos is! List) {
       // Indica que la respuesta no tiene el formato esperado por esta pantalla.
       throw const FormatException('Respuesta inválida.');
@@ -185,7 +199,7 @@ class _FormularioResenaPageState extends State<FormularioResenaPage> {
     }
     // Decodifica los bytes como UTF-8 para conservar acentos y convierte el JSON en datos de Dart.
     final datos = jsonDecode(utf8.decode(respuesta.bodyBytes));
-    // Comprueba que la respuesta sea una lista antes de convertir los actores.
+    // Comprueba que la respuesta sea una lista antes de convertir sus registros.
     if (datos is! List) {
       // Indica que la respuesta no tiene el formato esperado por esta pantalla.
       throw const FormatException('Respuesta inválida.');
@@ -308,14 +322,6 @@ class _FormularioResenaPageState extends State<FormularioResenaPage> {
         'etiquetas': _etiquetas.text.trim(),
         // Envía la sinopsis sin espacios sobrantes en los extremos.
         'sinopsis': _sinopsis.text.trim(),
-        // Conserva el valor guardado para mantener la compatibilidad con la web; este formulario ya no ofrece cambiarlo.
-        'destacada': (
-          // Reconoce el valor cuando la API lo representa como booleano.
-          widget.resena?['destacada'] == true ||
-          // También reconoce el valor 1 que puede llegar desde MySQL.
-          '${widget.resena?['destacada']}' == '1'
-        // Envía el resultado como texto, tal como se reciben los campos de esta solicitud.
-        ) ? 'true' : 'false',
       });
       // Obtiene la referencia de la portada nueva, si se eligió una.
       final portada = _portada;
@@ -334,7 +340,7 @@ class _FormularioResenaPageState extends State<FormularioResenaPage> {
           ),
         );
       }
-      // Ejecuta una función asíncrona inmediata para limitar conjuntamente la espera del envío y la lectura de la respuesta.
+      // Agrupa el envío y la lectura en una sola operación con límite de espera.
       final respuesta = await (() async {
         // Envía la solicitud y recibe una respuesta que llega como flujo de datos.
         final envio = await cliente.send(solicitud);
@@ -402,10 +408,63 @@ class _FormularioResenaPageState extends State<FormularioResenaPage> {
     }
     // Cierra el formulario solo si sigue abierto y el guardado fue confirmado.
     if (mounted && guardado) {
-      // Regresa a la lista y devuelve true para que se actualice el catálogo de actores.
+      // Regresa a la lista de reseñas y devuelve true para que se consulte de nuevo.
       Navigator.of(context).pop(true);
     }
   }
+  // Admite únicamente portadas del backend configurado, no enlaces de páginas externas.
+  String _urlPortadaActual() {
+    // ?? utiliza texto vacío cuando no hay una foto; no crea una imagen de prueba.
+    final foto = (widget.resena?['portada'] ?? '').toString().trim();
+    if (foto.isEmpty) return '';
+
+    // Uri separa una dirección en protocolo, servidor, puerto y ruta.
+    final base = Uri.parse(_servidor);
+    final uri = Uri.tryParse(foto);
+    if (uri == null) return '';
+
+    String ruta;
+    if (uri.hasScheme) {
+      // Una dirección completa debe pertenecer a nuestro backend.
+      // Las fotos de uploads se consultan públicamente mediante /portadas/.
+      if (uri.scheme != base.scheme ||
+          uri.host != base.host ||
+          uri.port != base.port ||
+          uri.userInfo.isNotEmpty ||
+          uri.hasQuery ||
+          uri.hasFragment ||
+          !uri.path.startsWith('/portadas/')) {
+        return '';
+      }
+      ruta = uri.path;
+    } else {
+      ruta = foto;
+    }
+
+    // Retira el prefijo local para conservar únicamente el nombre del archivo.
+    String nombre = ruta;
+    for (final prefijo in ['/portadas/', 'portadas/']) {
+      if (ruta.startsWith(prefijo)) {
+        nombre = ruta.substring(prefijo.length);
+        break;
+      }
+    }
+
+    // Rechaza nombres vacíos y rutas hacia otras carpetas.
+    if (nombre.isEmpty ||
+        nombre == '.' ||
+        nombre == '..' ||
+        nombre.contains('/') ||
+        nombre.contains(String.fromCharCode(92)) ||
+        nombre.contains(':')) {
+      return '';
+    }
+
+    // replace construye la ruta; pathSegments codifica el nombre del archivo.
+    return base.replace(pathSegments: ['portadas', nombre]).toString();
+  }
+
+
   // Muestra la portada nueva, la que ya tiene la reseña o un icono de respaldo.
   Widget _vistaPortada() {
     // Comprueba primero si se ha elegido una portada nueva.
@@ -427,17 +486,11 @@ class _FormularioResenaPageState extends State<FormularioResenaPage> {
       );
     }
     // Recupera el nombre de la portada actual cuando no hay una nueva selección.
-    final nombre = (widget.resena?['portada'] ?? '').toString();
-    // Si hay una portada guardada, intenta cargarla desde la API.
-    if (nombre.isNotEmpty) {
-      // Construye la dirección de la imagen con la dirección del servidor.
-      final url = Uri.parse(_servidor).replace(
-        // Añade la carpeta pública de imágenes y el nombre de la portada.
-        pathSegments: ['portadas', nombre],
-      );
-      // Descarga y muestra la fotografía existente desde el servidor.
+    // Valida la portada guardada y construye su dirección en el backend.
+    final url = _urlPortadaActual();
+    if (url.isNotEmpty) {
       return Image.network(
-        url.toString(),
+        url,
         // Altura solicitada en unidades lógicas de Flutter.
         height: 200,
         // Muestra la imagen completa dentro del espacio disponible, sin recortarla.
@@ -603,7 +656,7 @@ class _FormularioResenaPageState extends State<FormularioResenaPage> {
                   Text(
                     _editando
                         ? 'Si no eliges otra portada, se conserva la actual.'
-                        : 'Si no eliges portada, se utiliza la predeterminada.',
+                        : 'Si no eliges una imagen, la reseña quedará sin portada.',
                   ),
                   const SizedBox(height: 24),
                   TextFormField(
@@ -766,7 +819,7 @@ class _FormularioResenaPageState extends State<FormularioResenaPage> {
                     decoration: const InputDecoration(
                       // Etiqueta que identifica el campo del nombre.
                       labelText: 'Etiquetas',
-                      hintText: 'Suspenso, Misterio, Drama',
+                      hintText: 'Escribe las etiquetas separadas por comas',
                       // Explica cómo escribir las etiquetas y cuál es su límite.
                       helperText:
                           'Separa las etiquetas con comas. '
