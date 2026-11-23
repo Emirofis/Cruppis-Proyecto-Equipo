@@ -2,8 +2,24 @@
 // Recupera el token guardado, comprueba la cuenta y abre el contenido según su rol.
 // Inicio y Buscar comparten el catálogo; Perfil y el detalle se abren en otras pantallas.
 // Se conservan los nombres internos Spooky... y spooky_access_token para mantener la compatibilidad.
-
 // Permite interpretar las respuestas JSON de la API.
+// Notas para recordar los términos utilizados en este archivo:
+// Widget es una pieza de la interfaz. StatelessWidget no administra un estado propio que cambie.
+// StatefulWidget y State permiten conservar datos y actualizar lo que se ve en pantalla.
+// Future representa un resultado pendiente; async y await permiten esperar sin bloquear la interfaz.
+// FlutterSecureStorage guarda el token mediante el almacenamiento protegido del dispositivo.
+// La clave spooky_access_token identifica ese dato guardado: no es un token ni una cuenta de prueba.
+// JSON es el formato de intercambio con la API; UTF-8 permite conservar acentos y otros caracteres.
+// setState pide reconstruir la interfaz; mounted comprueba que la pantalla siga activa.
+// Un callback es una función que una pantalla recibe para comunicar una acción o un resultado.
+// ... copia campos de un mapa o incorpora elementos a una lista, según el lugar donde se utilice.
+// ?? utiliza otro valor cuando falta el primero; ?. accede a un dato solo si el objeto existe.
+// ! indica que se espera un valor no nulo; condición ? opción : otraOpción elige entre dos valores.
+// Un sliver es una sección de un área desplazable; permite combinar banner, títulos y filas de tarjetas.
+// SliverLayoutBuilder obtiene el ancho disponible para calcular las columnas de este catálogo.
+// Este archivo elige para el banner el ID más alto; no necesita la columna destacada de MySQL.
+// Ese banner cambia cuando se vuelve a consultar el catálogo, no mediante una actualización en tiempo real.
+
 import 'dart:convert';
 // Incluye los componentes de la pantalla, los formularios y la navegación.
 import 'package:flutter/material.dart';
@@ -58,7 +74,7 @@ class PublicacionesPage extends StatefulWidget {
 // Reúne el comportamiento de la pantalla principal.
 class _PublicacionesPageState extends State<PublicacionesPage> {
   // Dirección de la API en la computadora. Debe actualizarse si cambia su IPv4.
-  static const String _servidor = 'http://192.168.1.65:8000';
+  static const String _servidor = 'http://10.13.40.223:8000';
   // Nombre interno usado para guardar el token. Se conserva para poder leer las sesiones guardadas por versiones anteriores.
   static const String _claveToken = 'spooky_access_token';
   // Prepara el acceso al almacenamiento protegido donde se conserva el token.
@@ -168,7 +184,7 @@ class _PublicacionesPageState extends State<PublicacionesPage> {
         // Termina esta operación sin continuar con los pasos siguientes.
         return;
       }
-      // Informa que el servidor no confirmó el inicio de sesión.
+      // Comprueba si la API confirmó la consulta solicitada.
       if (respuesta.statusCode != 200) {
         throw Exception('No se pudo comprobar la sesión.');
       }
@@ -209,7 +225,7 @@ class _PublicacionesPageState extends State<PublicacionesPage> {
         .get(Uri.parse('$_servidor/api/publicaciones'))
         // Limita la espera de la respuesta a 20 segundos.
         .timeout(const Duration(seconds: 20));
-    // Informa que el servidor no confirmó el inicio de sesión.
+    // Comprueba si la API confirmó la consulta solicitada.
     if (respuesta.statusCode != 200) {
       throw Exception(
         'No se pudieron consultar las publicaciones '
@@ -528,16 +544,57 @@ class _PublicacionesPageState extends State<PublicacionesPage> {
     // Vuelve a consultar la API para mostrar la información actualizada.
     _recargar();
   }
-  // Construye la dirección de la portada o utiliza el nombre de la imagen de respaldo.
+  // Construye la portada solo con imágenes de /portadas/ en nuestro backend.
   String _urlPortada(Map<String, dynamic> publicacion) {
-    final nombre = (publicacion['portada'] ?? '').toString().trim();
-    return Uri.parse(_servidor).replace(
-      pathSegments: [
-        'portadas',
-        nombre.isEmpty ? 'default_cover.jpg' : nombre,
-      ],
-    ).toString();
-  }
+      // ?? utiliza texto vacío cuando no hay una foto; no crea una imagen de prueba.
+      final foto = (publicacion['portada'] ?? '').toString().trim();
+      if (foto.isEmpty) return '';
+
+      // Uri separa una dirección en protocolo, servidor, puerto y ruta.
+      final base = Uri.parse(_servidor);
+      final uri = Uri.tryParse(foto);
+      if (uri == null) return '';
+
+      String ruta;
+      if (uri.hasScheme) {
+        // Una dirección completa debe pertenecer a nuestro backend.
+        // Las fotos de uploads se consultan públicamente mediante /portadas/.
+        if (uri.scheme != base.scheme ||
+            uri.host != base.host ||
+            uri.port != base.port ||
+            uri.userInfo.isNotEmpty ||
+            uri.hasQuery ||
+            uri.hasFragment ||
+            !uri.path.startsWith('/portadas/')) {
+          return '';
+        }
+        ruta = uri.path;
+      } else {
+        ruta = foto;
+      }
+
+      // Retira el prefijo local para conservar únicamente el nombre del archivo.
+      String nombre = ruta;
+      for (final prefijo in ['/portadas/', 'portadas/']) {
+        if (ruta.startsWith(prefijo)) {
+          nombre = ruta.substring(prefijo.length);
+          break;
+        }
+      }
+
+      // Rechaza nombres vacíos y rutas hacia otras carpetas.
+      if (nombre.isEmpty ||
+          nombre == '.' ||
+          nombre == '..' ||
+          nombre.contains('/') ||
+          nombre.contains(String.fromCharCode(92)) ||
+          nombre.contains(':')) {
+        return '';
+      }
+
+      // replace construye la ruta; pathSegments codifica el nombre del archivo.
+      return base.replace(pathSegments: ['portadas', nombre]).toString();
+    }
   // Prepara las etiquetas para mostrarlas sin textos vacíos ni repeticiones exactas.
   List<String> _obtenerEtiquetas(
     Map<String, dynamic> publicacion,
@@ -593,6 +650,8 @@ class _PublicacionesPageState extends State<PublicacionesPage> {
       child: Stack(
         // Lista de widgets que se colocarán dentro del componente.
         children: [
+          // Solo solicita la portada si tiene una referencia válida del backend.
+          if (_urlPortada(publicacion).isNotEmpty)
           Positioned.fill(
             // Widget que se coloca dentro de este contenedor.
             child: Image.network(
@@ -601,7 +660,7 @@ class _PublicacionesPageState extends State<PublicacionesPage> {
               fit: BoxFit.cover,
               // Alinea la imagen o el contenido dentro de su espacio.
               alignment: Alignment.topCenter,
-              // Presenta un respaldo cuando la portada no se puede cargar.
+              // Si la imagen falla, muestra el indicador visual definido aquí; no descarga otra fotografía.
               errorBuilder: (context, error, stackTrace) {
                 return const ColoredBox(
                   // Color tomado del tema o del esquema de colores.
@@ -635,6 +694,7 @@ class _PublicacionesPageState extends State<PublicacionesPage> {
                   // Lista de widgets que se colocarán dentro del componente.
                   children: [
                     _etiqueta('${publicacion['tipo'] ?? ''}'),
+                    // Es una etiqueta visual del banner, no un campo guardado en la base.
                     _etiqueta('Reseña destacada'),
                   ],
                 ),
@@ -745,7 +805,7 @@ class _PublicacionesPageState extends State<PublicacionesPage> {
                       child: CircularProgressIndicator(),
                     );
                   },
-                  // Presenta un respaldo cuando la portada no se puede cargar.
+                  // Si la imagen falla, muestra el indicador visual definido aquí; no descarga otra fotografía.
                   errorBuilder: (context, error, stackTrace) {
                     return const Center(
                       // Widget que se coloca dentro de este contenedor.
