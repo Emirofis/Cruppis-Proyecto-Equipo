@@ -2,12 +2,25 @@
 // Presenta la información recibida y permite comentar, elegir una reacción y calificar.
 // Las acciones protegidas se envían a la API, que comprueba la sesión y los permisos.
 // Actualizar vuelve a consultar comentarios y calificaciones, no la ficha de la publicación.
+// StatefulWidget permite actualizar el contenido; State conserva los datos de la pantalla.
+// Future representa un resultado pendiente; async y await permiten esperar sin bloquear la interfaz.
+// Map guarda campos por nombre y List reúne varios registros; dynamic admite distintos tipos de valores.
+// JSON es el formato utilizado para comunicarse con la API y UTF-8 conserva acentos y emojis.
+// GlobalKey permite validar el Form; TextEditingController permite leer y limpiar lo escrito.
+// setState pide actualizar la interfaz; mounted comprueba que la pantalla siga activa.
+// try intenta la operación, catch atiende un error y finally libera los indicadores al terminar.
+// ?? elige otro valor si falta el primero; ?. permite acceder a un dato solo si el objeto existe.
+// ! indica que se espera un valor no nulo; condición ? opción : otraOpción elige entre dos valores.
+// FutureBuilder observa una consulta; snapshot contiene su estado, sus datos o el error.
+// Semantics y Tooltip describen los controles para facilitar su identificación y accesibilidad.
+// Unicode identifica caracteres y emojis; runes.length cuenta puntos de código, no siempre símbolos visibles.
+// Las reacciones son opciones reales del formulario, no comentarios ni votos de prueba.
 
-// Permite enviar las credenciales como JSON y leer la respuesta de la API.
+// Permite enviar comentarios y votos como JSON y leer las respuestas de la API.
 import 'dart:convert';
 // Incluye los componentes de la pantalla, los formularios y la navegación.
 import 'package:flutter/material.dart';
-// Permite enviar la solicitud de inicio de sesión a la API.
+// Permite consultar comentarios y calificaciones y enviar sus cambios a la API.
 import 'package:http/http.dart' as http;
 // Utiliza los estilos compartidos de Cruppis. El nombre del archivo se conserva para no romper las referencias.
 import '../../estilos/spooky_tema.dart';
@@ -38,7 +51,7 @@ class DetallePublicacionPage extends StatefulWidget {
 class _DetallePublicacionPageState
     extends State<DetallePublicacionPage> {
   // Dirección del backend; debe actualizarse si cambia la IPv4 de la computadora.
-  static const String _servidor = 'http://192.168.1.65:8000';
+  static const String _servidor = 'http://10.13.40.223:8000';
   // Guarda la consulta pendiente de comentarios que observará la pantalla.
   late Future<List<Map<String, dynamic>>> _comentarios;
   // Permite validar y restablecer el formulario de opinión.
@@ -104,7 +117,7 @@ class _DetallePublicacionPageState
         )
         // Limita la espera de la respuesta a 20 segundos.
         .timeout(const Duration(seconds: 20));
-    // Informa que el servidor no confirmó el inicio de sesión.
+    // Informa si la API no pudo devolver la lista de comentarios.
     if (respuesta.statusCode != 200) {
       throw Exception(
         'No se pudieron consultar los comentarios '
@@ -113,7 +126,7 @@ class _DetallePublicacionPageState
     }
     // Decodifica los bytes como UTF-8 para conservar acentos y convierte el JSON en datos de Dart.
     final datos = jsonDecode(utf8.decode(respuesta.bodyBytes));
-    // Comprueba que la respuesta sea una lista antes de convertir los actores.
+    // Comprueba que la respuesta sea una lista antes de convertir los comentarios.
     if (datos is! List) {
       throw const FormatException('La respuesta no es una lista.');
     }
@@ -159,29 +172,73 @@ class _DetallePublicacionPageState
       _cargarCalificacion(),
     ]);
   }
-  // Construye una dirección de imagen a partir del nombre de archivo recibido.
-  String _urlImagen(String nombre) {
-    // Utiliza la dirección de la API como base para agregar la ruta de la imagen.
-    return Uri.parse(_servidor).replace(
-      // Añade la carpeta pública de imágenes y el nombre del archivo.
-      pathSegments: ['portadas', nombre],
-    ).toString();
+  // Acepta nombres de archivo o direcciones /portadas/ del backend actual.
+  // No acepta fotografías alojadas en sitios externos.
+  String _urlImagen(String valor) {
+    // ?? utiliza texto vacío cuando no hay una foto; no crea una imagen de prueba.
+    final foto = valor.trim();
+    if (foto.isEmpty) return '';
+
+    // Uri separa una dirección en protocolo, servidor, puerto y ruta.
+    final base = Uri.parse(_servidor);
+    final uri = Uri.tryParse(foto);
+    if (uri == null) return '';
+
+    String ruta;
+    if (uri.hasScheme) {
+      // Una dirección completa debe pertenecer a nuestro backend.
+      // Las fotos de uploads se consultan públicamente mediante /portadas/.
+      if (uri.scheme != base.scheme ||
+          uri.host != base.host ||
+          uri.port != base.port ||
+          uri.userInfo.isNotEmpty ||
+          uri.hasQuery ||
+          uri.hasFragment ||
+          !uri.path.startsWith('/portadas/')) {
+        return '';
+      }
+      ruta = uri.path;
+    } else {
+      ruta = foto;
+    }
+
+    // Retira el prefijo local para conservar únicamente el nombre del archivo.
+    String nombre = ruta;
+    for (final prefijo in ['/portadas/', 'portadas/']) {
+      if (ruta.startsWith(prefijo)) {
+        nombre = ruta.substring(prefijo.length);
+        break;
+      }
+    }
+
+    // Rechaza nombres vacíos y rutas hacia otras carpetas.
+    if (nombre.isEmpty ||
+        nombre == '.' ||
+        nombre == '..' ||
+        nombre.contains('/') ||
+        nombre.contains(String.fromCharCode(92)) ||
+        nombre.contains(':')) {
+      return '';
+    }
+
+    // replace construye la ruta; pathSegments codifica el nombre del archivo.
+    return base.replace(pathSegments: ['portadas', nombre]).toString();
   }
-  // Obtiene la dirección de la portada o utiliza la imagen de respaldo si no hay un nombre.
+
+  // Obtiene la portada real sin asignar una imagen predeterminada.
   String get _urlPortada {
     final nombre =
         (widget.publicacion['portada'] ?? '').toString().trim();
-    return _urlImagen(
-      nombre.isEmpty ? 'default_cover.jpg' : nombre,
-    );
+    return _urlImagen(nombre);
   }
+
   // Prepara las etiquetas de la reseña para mostrarlas sin textos vacíos ni repeticiones exactas.
   List<String> _obtenerEtiquetas() {
     // Lee las etiquetas que se recibieron junto con la publicación.
     final datos = widget.publicacion['etiquetas'];
     // Si no se recibió una lista de etiquetas, continúa sin mostrar ninguna.
     if (datos is! List) return [];
-    // Devuelve la lista después de convertir cada elemento en un mapa de claves String.
+    // Prepara las etiquetas recibidas como una lista de textos.
     return datos
         // Conserva únicamente los elementos de texto.
         .whereType<String>()
@@ -318,7 +375,7 @@ class _DetallePublicacionPageState
         // Termina esta operación sin continuar con las instrucciones siguientes.
         return;
       }
-      // Informa que el servidor no confirmó el inicio de sesión.
+      // Informa si la API no pudo devolver la lista de comentarios.
       if (respuesta.statusCode != 200) {
         // Actualiza los valores y refleja el cambio en la pantalla.
         setState(() {
@@ -410,7 +467,7 @@ class _DetallePublicacionPageState
           .timeout(const Duration(seconds: 20));
       // Evita actualizar la interfaz si el widget se cerró mientras se esperaba una operación.
       if (!mounted) return;
-      // Informa que el servidor no confirmó el inicio de sesión.
+      // Informa si la API no pudo devolver la lista de comentarios.
       if (respuesta.statusCode != 200) {
         _mostrarMensaje(_mensajeError(respuesta));
         // Termina esta operación sin continuar con las instrucciones siguientes.
@@ -441,7 +498,7 @@ class _DetallePublicacionPageState
       });
     // Termina el estado de carga tanto si se aceptó el acceso como si ocurrió un error.
     } finally {
-      // Comprueba que el login siga abierto antes de actualizar su contenido.
+      // Comprueba que la pantalla de detalle siga activa antes de modificarla.
       if (mounted) {
         // Actualiza los valores y refleja el cambio en la pantalla.
         setState(() {
@@ -519,7 +576,7 @@ class _DetallePublicacionPageState
       );
     // Termina el estado de carga tanto si se aceptó el acceso como si ocurrió un error.
     } finally {
-      // Comprueba que el login siga abierto antes de actualizar su contenido.
+      // Comprueba que la pantalla de detalle siga activa antes de modificarla.
       if (mounted) {
         // Actualiza los valores y refleja el cambio en la pantalla.
         setState(() {
@@ -608,7 +665,7 @@ class _DetallePublicacionPageState
         // Termina esta operación sin continuar con las instrucciones siguientes.
         return;
       }
-      // Informa que el servidor no confirmó el inicio de sesión.
+      // Informa si la API no pudo devolver la lista de comentarios.
       if (respuesta.statusCode != 200) {
         _mostrarMensaje(_mensajeError(respuesta));
         // Termina esta operación sin continuar con las instrucciones siguientes.
@@ -625,7 +682,7 @@ class _DetallePublicacionPageState
       );
     // Termina el estado de carga tanto si se aceptó el acceso como si ocurrió un error.
     } finally {
-      // Comprueba que el login siga abierto antes de actualizar su contenido.
+      // Comprueba que la pantalla de detalle siga activa antes de modificarla.
       if (mounted) {
         // Actualiza los valores y refleja el cambio en la pantalla.
         setState(() {
@@ -771,31 +828,11 @@ class _DetallePublicacionPageState
     required String etiqueta,
     required String nombre,
     required String foto,
-    // Indica si la imagen llega como una dirección completa en lugar de un nombre de archivo.
-    bool fotoExterna = false,
   }) {
-    // Solo se asigna una dirección cuando hay una imagen que se puede intentar cargar.
-    String? url;
-    // Intenta construir una dirección únicamente cuando hay una referencia de imagen.
-    if (foto.isNotEmpty) {
-      // Revisa las imágenes que ya llegan como una dirección completa.
-      if (fotoExterna) {
-        // Intenta interpretar el texto como una URI; devuelve null si no se puede analizar.
-        final uri = Uri.tryParse(foto);
-        // Comprueba si se pudo interpretar la dirección y si utiliza HTTP o HTTPS.
-        if (uri != null &&
-            uri.hasAuthority &&
-            // Acepta las direcciones HTTP o HTTPS antes de intentar mostrarlas.
-            ['http', 'https'].contains(uri.scheme.toLowerCase())) {
-          // Conserva la dirección completa de la fotografía.
-          url = uri.toString();
-        }
-      // Utiliza esta alternativa cuando no se cumple la condición anterior.
-      } else {
-        // Construye la dirección para una fotografía guardada en la carpeta de portadas.
-        url = _urlImagen(foto);
-      }
-    }
+    // Las fichas de director y actor utilizan la misma validación de fotos locales.
+    final direccion = _urlImagen(foto);
+    // null indica que se mostrará la silueta porque no hay una dirección válida.
+    final String? url = direccion.isEmpty ? null : direccion;
     return Container(
       // Aplica el fondo, el borde y la sombra definidos en los estilos compartidos.
       decoration: SpookyDetalleEstilos.fichaDirector,
@@ -823,7 +860,7 @@ class _DetallePublicacionPageState
                       height: SpookyDetalleEstilos.tamanoFoto,
                       // Ajusta la imagen al espacio indicado: contain la muestra completa y cover llena el marco recortando lo necesario.
                       fit: BoxFit.cover,
-                      // Utiliza una imagen o un icono de respaldo cuando no se puede cargar la fotografía.
+                      // Muestra un icono si falla la imagen; no intenta cargar fotografías de prueba.
                       errorBuilder: (context, error, stackTrace) {
                         return _sinFotoDirector();
                       },
@@ -834,7 +871,7 @@ class _DetallePublicacionPageState
           Expanded(
             // Widget que se coloca dentro de este contenedor.
             child: Column(
-              // stretch estira los elementos horizontalmente dentro de la columna.
+              // start alinea el contenido al inicio horizontal de la columna.
               crossAxisAlignment: CrossAxisAlignment.start,
               // Lista de widgets que se colocarán dentro del componente.
               children: [
@@ -871,7 +908,7 @@ class _DetallePublicacionPageState
       foto: foto,
     );
   }
-  // Prepara la tarjeta del protagonista utilizando la dirección completa que envía la API.
+  // Prepara la tarjeta del protagonista con la foto local que devuelve la API.
   Widget _seccionActor() {
     return _fichaPersona(
       // Texto que identifica si la ficha corresponde al director o al protagonista.
@@ -880,8 +917,6 @@ class _DetallePublicacionPageState
       nombre: (widget.publicacion['actor'] ?? '').toString(),
       // Referencia de la fotografía que utilizará la ficha.
       foto: (widget.publicacion['foto_actor'] ?? '').toString().trim(),
-      // Indica que la fotografía del actor llega como una dirección completa.
-      fotoExterna: true,
     );
   }
   // Acomoda las fichas del director y del actor según el espacio disponible.
@@ -1079,13 +1114,16 @@ class _DetallePublicacionPageState
       ),
     );
   }
-  // Presenta la portada con su sombra, indicador de carga e imagen de respaldo.
+  // Presenta la portada real con su sombra e indicador de carga.
   Widget _portada() {
+    // Si no hay una portada válida, no solicita una imagen de prueba.
+    final url = _urlPortada;
+    if (url.isEmpty) return const SizedBox.shrink();
     return Center(
       // Widget que se coloca dentro de este contenedor.
       child: ConstrainedBox(
         constraints: const BoxConstraints(
-          // Solicita una anchura máxima de 1600 para la imagen seleccionada.
+          // Limita el ancho de la portada al valor definido en el tema de Cruppis.
           maxWidth: SpookyDetalleEstilos.anchoPortada,
         ),
         // Widget que se coloca dentro de este contenedor.
@@ -1100,7 +1138,7 @@ class _DetallePublicacionPageState
             ),
             // Widget que se coloca dentro de este contenedor.
             child: Image.network(
-              _urlPortada,
+              url,
               // Ancho solicitado en unidades lógicas de Flutter.
               width: double.infinity,
               // Ajusta la imagen al espacio indicado: contain la muestra completa y cover llena el marco recortando lo necesario.
@@ -1119,7 +1157,7 @@ class _DetallePublicacionPageState
                   ),
                 );
               },
-              // Utiliza una imagen o un icono de respaldo cuando no se puede cargar la fotografía.
+              // Muestra un icono si falla la imagen; no intenta cargar fotografías de prueba.
               errorBuilder: (context, error, stackTrace) {
                 return const SizedBox(
                   // Altura solicitada en unidades lógicas de Flutter.
@@ -1281,7 +1319,7 @@ class _DetallePublicacionPageState
           // Muestra el mensaje de error y una opción para volver a consultar.
           if (snapshot.hasError) {
             return Column(
-              // stretch estira los elementos horizontalmente dentro de la columna.
+              // start alinea el contenido al inicio horizontal de la columna.
               crossAxisAlignment: CrossAxisAlignment.start,
               // Lista de widgets que se colocarán dentro del componente.
               children: [
