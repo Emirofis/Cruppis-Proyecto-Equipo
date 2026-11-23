@@ -1,7 +1,19 @@
 // CRUPPIS — Pantalla de inicio de sesión.
 // Comprueba las credenciales con la API y entrega la respuesta al controlador de sesión.
 // La asignación de roles y los permisos se revisan en el servidor.
-
+// StatefulWidget permite que cambie el contenido; State conserva los datos de la pantalla.
+// Future representa un resultado pendiente; async y await permiten esperar sin bloquear la interfaz.
+// Una función recibida como parámetro se conoce como callback: se llama cuando ocurre una acción.
+// onSesion entrega el acceso confirmado al controlador; este archivo no guarda el token por sí solo.
+// Map agrupa campos por nombre; dynamic permite valores de distintos tipos.
+// final impide reasignar una variable y const permite definir valores constantes.
+// null representa ausencia de valor; ?? elige la alternativa si falta el primero.
+// ?. llama a un método solo si el objeto existe; ! indica que se espera un valor no nulo.
+// JSON es el formato de intercambio con la API; UTF-8 conserva acentos y otros caracteres.
+// setState pide actualizar la interfaz; mounted comprueba que la pantalla siga activa.
+// try intenta una operación, catch atiende un error y finally libera el estado de carga.
+// Navigator abre o cierra pantallas; el resultado de pop puede regresar a la pantalla anterior.
+// Las medidas son unidades lógicas de Flutter, no píxeles físicos del teléfono.
 // Permite enviar las credenciales como JSON y leer la respuesta de la API.
 import 'dart:convert';
 // Incluye los componentes de la pantalla, los formularios y la navegación.
@@ -19,7 +31,8 @@ class LoginPage extends StatefulWidget {
     super.key,
     this.onSesion,
   });
-  // Función opcional que recibe la sesión confirmada. Puede esperar otras tareas, como guardar el token y abrir la pantalla correspondiente.
+  // Función opcional que recibe la sesión confirmada.
+  // El controlador que la proporciona decide cómo guardar el token y abrir la pantalla del usuario.
   final Future<void> Function(Map<String, dynamic> sesion)? onSesion;
   @override
   // Crea el estado que administra los campos y las acciones de esta pantalla.
@@ -113,7 +126,7 @@ class _LoginPageState extends State<LoginPage> {
           // Envía las credenciales mediante una solicitud POST.
           .post(
             // Dirección del login de la API. Debe actualizarse si cambia la IPv4 de la computadora.
-            Uri.parse('http://192.168.1.65:8000/api/login'),
+            Uri.parse('http://10.13.40.223:8000/api/login'),
             // Encabezados que acompañan la petición HTTP.
             headers: {
               // Indica al servidor que el cuerpo de la solicitud contiene JSON.
@@ -223,7 +236,7 @@ class _LoginPageState extends State<LoginPage> {
     final onSesion = widget.onSesion;
     // Si se recibió esa función, le entrega los datos de acceso.
     if (onSesion != null) {
-      // Espera las tareas del controlador de sesión, como guardar el token y abrir la pantalla del rol.
+      // Espera a que termine la función del controlador que recibió la sesión.
       await onSesion(sesion);
     // Utiliza esta alternativa si no se proporcionó una función para recibir la sesión.
     } else {
@@ -242,7 +255,7 @@ class _LoginPageState extends State<LoginPage> {
           width: 112,
           // Altura solicitada en unidades lógicas de Flutter.
           height: 112,
-          // Aplica la decoración correspondiente al fondo, al logo o al botón.
+          // Configura el aspecto del elemento que se describe a continuación.
           decoration: BoxDecoration(
             // Da una forma circular al fondo del logo.
             shape: BoxShape.circle,
@@ -285,7 +298,7 @@ class _LoginPageState extends State<LoginPage> {
               width: 106,
               // Altura solicitada en unidades lógicas de Flutter.
               height: 106,
-              // cover llena el espacio disponible y recorta los bordes de la imagen si es necesario.
+              // contain muestra el logo completo manteniendo su proporción, sin recortarlo.
               fit: BoxFit.contain,
               // Describe el logo para las herramientas de accesibilidad.
               semanticLabel: 'Logo de Cruppis',
@@ -337,7 +350,7 @@ class _LoginPageState extends State<LoginPage> {
       ),
       // Contenido principal de la pantalla.
       body: DecoratedBox(
-        // Aplica la decoración correspondiente al fondo, al logo o al botón.
+        // Configura el aspecto del elemento que se describe a continuación.
         decoration: SpookyLectorEstilos.fondo,
         // Widget que se coloca dentro de este contenedor.
         child: SizedBox.expand(
@@ -411,9 +424,9 @@ class _LoginPageState extends State<LoginPage> {
                             // Cierra el teclado antes de continuar con la acción.
                             FocusScope.of(context).unfocus();
                           },
-                          // Aplica la decoración correspondiente al fondo, al logo o al botón.
+                          // Configura el aspecto del elemento que se describe a continuación.
                           decoration: const InputDecoration(
-                            // Etiqueta que identifica el campo del nombre.
+                            // Etiqueta que identifica el dato solicitado en este campo.
                             labelText: 'Correo electrónico',
                             prefixIcon: Icon(
                               Icons.email_outlined,
@@ -421,7 +434,7 @@ class _LoginPageState extends State<LoginPage> {
                               color: SpookyTema.lila,
                             ),
                           ),
-                          // Revisa el texto y devuelve un mensaje si el nombre no es válido.
+                          // Revisa el contenido y devuelve un mensaje cuando el campo no pasa la validación.
                           validator: (valor) {
                             // Prepara el correo para comprobar que no esté vacío y que incluya una arroba.
                             final correo = (valor ?? '').trim();
@@ -457,9 +470,9 @@ class _LoginPageState extends State<LoginPage> {
                             // Intenta entrar cuando se pulsa la acción del teclado.
                             _iniciarSesion();
                           },
-                          // Aplica la decoración correspondiente al fondo, al logo o al botón.
+                          // Configura el aspecto del elemento que se describe a continuación.
                           decoration: InputDecoration(
-                            // Etiqueta que identifica el campo del nombre.
+                            // Etiqueta que identifica el dato solicitado en este campo.
                             labelText: 'Contraseña',
                             prefixIcon: const Icon(
                               Icons.lock_outline,
@@ -498,7 +511,7 @@ class _LoginPageState extends State<LoginPage> {
                               ),
                             ),
                           ),
-                          // Revisa el texto y devuelve un mensaje si el nombre no es válido.
+                          // Revisa el contenido y devuelve un mensaje cuando el campo no pasa la validación.
                           validator: (valor) {
                             // No permite enviar el campo de contraseña vacío.
                             if (valor == null || valor.isEmpty) {
@@ -522,7 +535,7 @@ class _LoginPageState extends State<LoginPage> {
                         ],
                        const SizedBox(height: 24),
                         DecoratedBox(
-                          // Aplica la decoración correspondiente al fondo, al logo o al botón.
+                          // Configura el aspecto del elemento que se describe a continuación.
                           decoration: SpookyPanelEstilos.resplandorBoton,
                           // Widget que se coloca dentro de este contenedor.
                           child: FilledButton(
@@ -578,6 +591,7 @@ class _LoginPageState extends State<LoginPage> {
   }
 }
 // Agrupa los errores de acceso con un mensaje propio para distinguirlos de otros fallos.
+// implements Exception identifica esta clase como un error que puede capturarse por su tipo.
 class _ErrorLogin implements Exception {
   // Recibe la explicación que se mostrará cuando se capture este error.
   const _ErrorLogin(this.mensaje);
