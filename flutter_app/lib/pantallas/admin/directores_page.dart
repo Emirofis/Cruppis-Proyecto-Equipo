@@ -2,7 +2,17 @@
 // Esta pantalla muestra los registros y permite abrir su formulario o solicitar una eliminación.
 // El formulario se encuentra en formulario_director_page.dart.
 // La API comprueba los permisos y realiza los cambios en MySQL.
-
+// StatefulWidget permite que la pantalla cambie; State conserva sus datos actuales.
+// Future es un resultado que llegará después; async y await permiten esperar sin bloquear la interfaz.
+// Map guarda campos y valores; List reúne varios registros; dynamic permite distintos tipos de valores.
+// late indica que el valor se asignará antes de utilizarlo; final impide reasignarlo y const define constantes.
+// setState pide actualizar la interfaz; mounted comprueba que la pantalla siga activa.
+// JSON es el formato que envía la API; UTF-8 conserva acentos y otros caracteres.
+// Bearer acompaña al token en Authorization; el backend comprueba su validez y los permisos.
+// FutureBuilder observa una consulta; snapshot contiene su estado, sus datos o su error.
+// Navigator abre o cierra pantallas; showDialog presenta la pregunta de confirmación.
+// condición ? opción : otraOpción elige entre dos valores; onPressed: null desactiva un botón.
+// Las medidas de tamaño se expresan en unidades lógicas de Flutter, no en píxeles físicos.
 // Permite leer las respuestas JSON de la API y conservar correctamente los acentos.
 import 'dart:convert';
 // Incluye los componentes que se utilizan para construir la pantalla.
@@ -29,7 +39,7 @@ class DirectoresPage extends StatefulWidget {
 // Reúne las consultas, los mensajes y la presentación de la lista de directores.
 class _DirectoresPageState extends State<DirectoresPage> {
   // Dirección de la API en la computadora. Debe actualizarse si cambia su IPv4.
-  static const String _servidor = 'http://192.168.1.65:8000';
+  static const String _servidor = 'http://10.13.40.223:8000';
   // Guarda la consulta pendiente y su futura lista de resultados. Se prepara en initState.
   late Future<List<Map<String, dynamic>>> _directores;
   // Evita iniciar otras acciones mientras se está eliminando un director.
@@ -58,7 +68,7 @@ class _DirectoresPageState extends State<DirectoresPage> {
             'Authorization': 'Bearer ${widget.token}',
           },
         )
-        // Limita la espera a 20 segundos para evitar que la operación quede esperando indefinidamente.
+        // Limita la espera a 20 segundos. Si vence durante una eliminación, hay que consultar la lista para saber si se completó.
         .timeout(const Duration(seconds: 20));
     // Detecta que la API no aceptó la sesión, por ejemplo porque venció el token.
     if (respuesta.statusCode == 401) {
@@ -189,8 +199,8 @@ class _DirectoresPageState extends State<DirectoresPage> {
       // Termina esta operación para no continuar con datos o condiciones incorrectas.
       return;
     }
-    // Obtiene el nombre para mostrarlo en la confirmación; usa un texto de respaldo si falta.
-    final nombre = (director['nombre'] ?? 'este director').toString();
+    // Obtiene el nombre real del director para la pregunta de confirmación.
+    final nombre = (director['nombre'] ?? '').toString();
     // Abre la pregunta de confirmación y espera la respuesta.
     final confirmar = await showDialog<bool>(
       // Utiliza la pantalla actual como referencia para mostrar el aviso.
@@ -253,7 +263,7 @@ class _DirectoresPageState extends State<DirectoresPage> {
               'Authorization': 'Bearer ${widget.token}',
             },
           )
-          // Limita la espera a 20 segundos para evitar que la operación quede esperando indefinidamente.
+          // Limita la espera a 20 segundos. Si vence durante una eliminación, hay que consultar la lista para saber si se completó.
           .timeout(const Duration(seconds: 20));
       // Comprueba que la pantalla siga abierta antes de utilizarla después de una espera.
       if (!mounted) return;
@@ -273,7 +283,7 @@ class _DirectoresPageState extends State<DirectoresPage> {
       _recargar();
       // Muestra el aviso correspondiente sin cerrar la pantalla.
       _mostrarMensaje('Director eliminado correctamente.');
-    // Si la respuesta no se pudo leer, utiliza el mensaje general que aparece después.
+    // Si falla la conexión o vence la espera, no se da la eliminación por confirmada.
     } catch (_) {
       // Muestra el aviso correspondiente sin cerrar la pantalla.
       _mostrarMensaje(
@@ -294,20 +304,58 @@ class _DirectoresPageState extends State<DirectoresPage> {
       }
     }
   }
-  // Construye la dirección de la fotografía usando el nombre que devuelve la API.
+  // Construye la dirección únicamente para fotos guardadas en backend/uploads.
   String _urlFoto(Map<String, dynamic> director) {
-    // Lee el nombre de la imagen y elimina espacios que puedan sobrar.
+    // ?? utiliza texto vacío cuando no hay una foto; no crea una imagen de prueba.
     final foto = (director['foto'] ?? '').toString().trim();
-    // Parte de la dirección del servidor y agrega la ruta de la fotografía.
-    return Uri.parse(_servidor).replace(
-      // Construye la ruta por partes para que Uri se encargue de los caracteres especiales.
-      pathSegments: [
-        'portadas',
-        // Utiliza la imagen de respaldo si no se recibió un nombre de fotografía.
-        foto.isEmpty ? 'default_director.jpg' : foto,
-      ],
-    ).toString();
+    if (foto.isEmpty) return '';
+
+    // Uri separa una dirección en protocolo, servidor, puerto y ruta.
+    final base = Uri.parse(_servidor);
+    final uri = Uri.tryParse(foto);
+    if (uri == null) return '';
+
+    String ruta;
+    if (uri.hasScheme) {
+      // Una dirección completa debe pertenecer a nuestro backend.
+      // Las fotos de uploads se consultan públicamente mediante /portadas/.
+      if (uri.scheme != base.scheme ||
+          uri.host != base.host ||
+          uri.port != base.port ||
+          uri.userInfo.isNotEmpty ||
+          uri.hasQuery ||
+          uri.hasFragment ||
+          !uri.path.startsWith('/portadas/')) {
+        return '';
+      }
+      ruta = uri.path;
+    } else {
+      ruta = foto;
+    }
+
+    // Retira el prefijo local para conservar únicamente el nombre del archivo.
+    String nombre = ruta;
+    for (final prefijo in ['/portadas/', 'portadas/']) {
+      if (ruta.startsWith(prefijo)) {
+        nombre = ruta.substring(prefijo.length);
+        break;
+      }
+    }
+
+    // Rechaza nombres vacíos y rutas hacia otras carpetas.
+    if (nombre.isEmpty ||
+        nombre == '.' ||
+        nombre == '..' ||
+        nombre.contains('/') ||
+        nombre.contains(String.fromCharCode(92)) ||
+        nombre.contains(':')) {
+      return '';
+    }
+
+    // replace construye la ruta; pathSegments codifica el nombre del archivo.
+    return base.replace(pathSegments: ['portadas', nombre]).toString();
   }
+
   // Construye la tarjeta con la fotografía, el nombre y los botones del director.
   Widget _tarjetaDirector(Map<String, dynamic> director) {
     // Obtiene los colores del tema de Cruppis para aplicarlos a los botones.
@@ -344,7 +392,7 @@ class _DirectoresPageState extends State<DirectoresPage> {
                     height: 80,
                     // Llena el espacio de la imagen manteniendo su proporción; puede recortar los bordes.
                     fit: BoxFit.cover,
-                    // Muestra un icono de respaldo si la fotografía no se puede cargar.
+                    // Muestra una silueta si la foto no se puede cargar; no descarga una imagen de prueba.
                     errorBuilder: (context, error, stackTrace) {
                       return const SizedBox(
                         // Define el ancho solicitado para este elemento.
@@ -365,8 +413,8 @@ class _DirectoresPageState extends State<DirectoresPage> {
                 Expanded(
                   // Define el contenido que se coloca dentro de este componente.
                   child: Text(
-                    // Muestra el nombre del director o un texto de respaldo si no está disponible.
-                    '${director['nombre'] ?? 'Sin nombre'}',
+                    // Muestra el nombre guardado; no agrega nombres de ejemplo.
+                    (director['nombre'] ?? '').toString(),
                     // Aplica los colores, tamaños o forma que corresponden a este elemento.
                     style: const TextStyle(
                       // Define el tamaño del texto.
