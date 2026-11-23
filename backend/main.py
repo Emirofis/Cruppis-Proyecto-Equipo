@@ -1,15 +1,13 @@
 # CRUPPIS — API de la aplicación móvil.
 # Recibe las solicitudes de Flutter, revisa los datos y consulta MySQL.
 # Las fotografías se guardan en backend/uploads y se consultan desde /portadas.
-# Se conservan las rutas y las instrucciones para mantener el funcionamiento actual.
+# Cada ruta atiende una operación que solicita la aplicación Flutter.
 
 
 # Permite trabajar con fechas, duración y hora UTC para el vencimiento del token.
 from datetime import datetime, timedelta, timezone
 # Permite construir rutas de carpetas y archivos.
 from pathlib import Path
-# Permite separar y examinar las partes de una URL.
-from urllib.parse import urlparse
 # Genera valores aleatorios para la clave de sesión y los nombres de imágenes.
 import secrets
 # Permite revisar formatos de texto, como el correo electrónico.
@@ -29,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 # Permite definir qué datos se reciben y qué límites deben cumplir.
 from pydantic import BaseModel, Field
 # Crea la API y establece Cruppis como nombre de su documentación.
+# FastAPI organiza las direcciones que Flutter puede consultar. API significa interfaz de comunicación.
 app = FastAPI(title="Cruppis API")
 # Guarda las imágenes dentro del backend, sin depender de la carpeta de la web.
 CARPETA_PORTADAS = Path(__file__).resolve().parent / "uploads"
@@ -41,12 +40,15 @@ app.mount(
     name="portadas",
 )
 # Genera la clave que permite comprobar los tokens. Cambia al reiniciar la API, por lo que será necesario volver a iniciar sesión.
+# JWT es el token firmado que identifica la sesión. La clave sirve para comprobar su firma.
+# Esta clave cambia al reiniciar el backend; los tokens anteriores dejan de ser válidos.
 CLAVE_JWT = secrets.token_urlsafe(64)
 # Define el método que se utiliza para firmar y comprobar los tokens.
 ALGORITMO_JWT = "HS256"
 # Establece el máximo permitido: 5 × 1024 × 1024 bytes.
 MAXIMO_FOTO = 5 * 1024 * 1024
-# Prepara una comparación de contraseña incluso si el correo no existe, para reducir diferencias en el tiempo de respuesta.
+# Genera un hash para comparar también cuando el correo no existe.
+# No es una cuenta ni una contraseña de prueba: reduce diferencias en el tiempo de respuesta.
 HASH_COMPROBACION = bcrypt.hashpw(
     secrets.token_bytes(32),
     bcrypt.gensalt(),
@@ -56,28 +58,46 @@ seguridad = HTTPBearer(auto_error=False)
 # Las fotos nuevas se guardan con una ruta de la API, sin fijar una dirección IP.
 RUTA_FOTOS_API = "/portadas/"
 
-# Permite seguir leyendo las referencias antiguas sin cambiar la base de datos.
-RUTA_FOTOS_ANTERIOR = "/proyecto_equipo/equipo_web/admin/uploads/"
-
-# Convierte las fotos locales a la dirección actual de la API.
-# Las direcciones externas se conservan para no cambiar imágenes ya registradas.
+# Busca la fotografía únicamente dentro de backend/uploads.
+# No carga imágenes externas ni utiliza rutas de la antigua web.
 def foto_para_app(foto, request: Request):
+    # None indica que no hay una fotografía disponible.
     if not foto:
-        return foto
+        return None
 
-    texto = str(foto).strip()
-    nombre = texto
+    # Convierte el dato a texto y elimina espacios exteriores.
+    nombre = str(foto).strip()
 
-    for prefijo in (RUTA_FOTOS_ANTERIOR, RUTA_FOTOS_API, "portadas/"):
-        if texto.startswith(prefijo):
-            nombre = texto[len(prefijo):]
+    # Quita el prefijo local para obtener el nombre del archivo.
+    # len cuenta los caracteres del prefijo y [len(prefijo):] conserva el resto.
+    for prefijo in (RUTA_FOTOS_API, "portadas/"):
+        if nombre.startswith(prefijo):
+            nombre = nombre[len(prefijo):]
             break
 
-    # Solo convierte nombres de archivo, no rutas a otras carpetas.
-    if nombre and nombre not in (".", "..") and "/" not in nombre and chr(92) not in nombre:
-        return str(request.url_for("portadas", path=nombre))
+    # Rechaza enlaces externos y rutas hacia otras carpetas.
+    # chr(92) representa la barra invertida que utiliza Windows.
+    if (
+        not nombre
+        or nombre in (".", "..")
+        or "/" in nombre
+        or chr(92) in nombre
+        or ":" in nombre
+    ):
+        return None
 
-    return texto
+    # resolve obtiene la ubicación completa del archivo.
+    carpeta = CARPETA_PORTADAS.resolve()
+    archivo = (carpeta / nombre).resolve()
+
+    # parent comprueba la carpeta del archivo; is_file confirma que exista.
+    # También rechaza enlaces del sistema que apunten fuera de uploads.
+    if archivo.parent != carpeta or not archivo.is_file():
+        return None
+
+    # url_for genera la dirección para consultar la foto desde el backend actual.
+    # Esta URL pertenece a nuestra API, no a un servidor externo.
+    return str(request.url_for("portadas", path=nombre))
 
 # Adapta las fotografías de los actores antes de devolver las publicaciones a Flutter.
 def preparar_fotos_publicaciones(publicaciones, request: Request):
@@ -87,12 +107,15 @@ def preparar_fotos_publicaciones(publicaciones, request: Request):
         )
     return publicaciones
 # Agrupa los campos que se reciben en una solicitud y sus reglas de validación.
+# BaseModel describe los datos recibidos; Field establece límites para sus campos.
 class DatosLogin(BaseModel):
     # Define el campo correo con un límite de 254 caracteres.
     correo: str = Field(min_length=1, max_length=254)
     # Recibe la contraseña; su tamaño en bytes se revisa antes de guardarla.
     password: str = Field(min_length=1, max_length=4096)
 # Abre la conexión con la base de datos del proyecto. Debe cerrarse cuando termine de utilizarse.
+# DictCursor devuelve cada fila como un diccionario para consultar columnas por su nombre.
+# root y la contraseña vacía son la configuración local actual de MySQL, no una cuenta de la app.
 def conectar():
     return pymysql.connect(
         host="localhost",
@@ -103,16 +126,21 @@ def conectar():
         cursorclass=pymysql.cursors.DictCursor,
     )
 # Compara la contraseña recibida con el hash almacenado, sin recuperar la contraseña original.
+# Un hash es el resultado calculado para comprobar una contraseña sin guardar su texto original.
+# bool indica que la función devuelve True o False.
+# Esta versión compara solo los primeros 72 bytes recibidos.
 def verificar_password(password: str, hash_guardado: bytes) -> bool:
     try:
         return bcrypt.checkpw(
             password.encode("utf-8")[:72],
             hash_guardado,
         )
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except (ValueError, TypeError):
         return False
 # Valida el token de sesión y comprueba que la cuenta todavía existe en MySQL.
+# Depends ejecuta la comprobación indicada antes de continuar con una ruta protegida.
+# Bearer es el tipo de credencial que acompaña al token en Authorization.
 def exigir_usuario(
     # Recibe el token extraído del encabezado Authorization.
     credenciales: HTTPAuthorizationCredentials | None = Depends(seguridad),
@@ -127,10 +155,12 @@ def exigir_usuario(
         credenciales is None
         or credenciales.scheme.lower() != "bearer"
     ):
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise error
     try:
         # Recupera los datos que se van a revisar en esta operación.
+        # decode verifica la firma y la vigencia del token. sub identifica la cuenta,
+        # exp indica el vencimiento e iat indica cuándo se emitió.
         datos = jwt.decode(
             credenciales.credentials,
             CLAVE_JWT,
@@ -140,18 +170,18 @@ def exigir_usuario(
         # Obtiene el identificador de la cuenta para consultarla en la base de datos.
         id_usuario = int(datos["sub"])
         if id_usuario <= 0:
-            # Interrumpe la operación y comunica el error.
+            # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
             raise error
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except (jwt.InvalidTokenError, ValueError, TypeError):
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise error
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT id_usuario, nombre, correo, rol
@@ -160,14 +190,14 @@ def exigir_usuario(
                 """,
                 (id_usuario,),
             )
-            # Recupera el registro encontrado; si no existe, el resultado es None.
+            # fetchone obtiene una fila; None indica que no se encontró ninguna.
             usuario = cursor.fetchone()
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
     if usuario is None:
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise error
     return usuario
 # Permite continuar únicamente a la cuenta administrativa original: rol Administrador e identificador 1.
@@ -179,7 +209,7 @@ def exigir_administrador(
         int(usuario["id_usuario"]) != 1
         or usuario["rol"] != "Administrador"
     ):
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=403,
             detail="Esta acción requiere permisos de administrador.",
@@ -192,13 +222,17 @@ def exigir_lector(
     usuario: dict = Depends(exigir_usuario),
 ):
     if usuario["rol"] != "Lector":
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=403,
             detail="Inicia sesión como lector para realizar esta acción.",
         )
     return usuario
-# Lee como máximo 5 MB más un byte, identifica JPG/PNG/WEBP por su firma y guarda el archivo con nombre aleatorio.
+# Lee hasta 5 MB más un byte para detectar si se supera el límite.
+# Reconoce el formato por sus bytes iniciales y guarda la foto con un nombre aleatorio.
+# Revisar esos bytes no equivale a comprobar que toda la imagen pueda abrirse.
+# UploadFile representa el archivo recibido; None significa que no se envió uno.
+# El símbolo | permite aceptar uno u otro tipo de dato.
 def guardar_foto(
     # Recibe el archivo de imagen; None significa que no se envió uno.
     foto: UploadFile | None,
@@ -213,11 +247,12 @@ def guardar_foto(
         # Lee el contenido de la imagen para revisar su tamaño y formato.
         contenido = foto.file.read(MAXIMO_FOTO + 1)
         if len(contenido) > MAXIMO_FOTO:
-            # Interrumpe la operación y comunica el error.
+            # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
             raise HTTPException(
                 status_code=413,
                 detail="La imagen no debe superar los 5 MB.",
             )
+        # startswith compara los primeros bytes, es decir, los datos iniciales del archivo.
         if contenido.startswith(b"\xff\xd8\xff"):
             # Elige la extensión que corresponde al formato reconocido de la imagen.
             extension = ".jpg"
@@ -231,9 +266,9 @@ def guardar_foto(
         ):
             # Elige la extensión que corresponde al formato reconocido de la imagen.
             extension = ".webp"
-        # Ejecuta esta alternativa cuando no se cumple la condición anterior.
+        # Si el archivo no coincide con los formatos anteriores, entra en esta alternativa.
         else:
-            # Interrumpe la operación y comunica el error.
+            # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
             raise HTTPException(
                 status_code=422,
                 detail="Selecciona una imagen JPG, PNG o WEBP.",
@@ -243,16 +278,16 @@ def guardar_foto(
         # Construye la ubicación del archivo dentro de la carpeta de imágenes.
         ruta = CARPETA_PORTADAS / nombre
         try:
-            # Ejecuta esta operación auxiliar: ruta.write_bytes(contenido).
+            # Guarda los bytes recibidos en el archivo de imagen.
             ruta.write_bytes(contenido)
-        # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+        # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
         except OSError:
             # Elimina el archivo indicado sin provocar otro error si ya no existe.
             ruta.unlink(missing_ok=True)
-            # Interrumpe la operación y comunica el error.
+            # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
             raise
         return nombre
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra el archivo temporal recibido en la carga de la imagen.
         foto.file.close()
@@ -266,9 +301,9 @@ def iniciar_sesion(datos: DatosLogin):
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT id_usuario, nombre, correo, password, rol
@@ -278,9 +313,9 @@ def iniciar_sesion(datos: DatosLogin):
                 """,
                 (datos.correo.strip(),),
             )
-            # Recupera el registro encontrado; si no existe, el resultado es None.
+            # fetchone obtiene una fila; None indica que no se encontró ninguna.
             usuario = cursor.fetchone()
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -304,7 +339,7 @@ def iniciar_sesion(datos: DatosLogin):
         )
     )
     if not password_correcta or not rol_permitido:
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=401,
             detail="Credenciales incorrectas o usuario no registrado.",
@@ -334,6 +369,9 @@ def iniciar_sesion(datos: DatosLogin):
 # Consulta compartida por el catálogo y el panel.
 # Agrega actor, etiquetas y promedio sin quitar los campos anteriores.
 # Consulta reseñas con director, actor, etiquetas y resumen de estrellas; se reutiliza en catálogo, detalle y administración.
+# LEFT JOIN conserva cada reseña aunque falte su director o actor.
+# COALESCE sustituye NULL en el resultado: cero votos significa que aún no hay calificaciones.
+# AVG calcula el promedio, COUNT cuenta votos y ROUND limita los decimales.
 def consultar_publicaciones(
     # Identifica la reseña sobre la que se realiza la operación.
     id_publicacion: int | None = None,
@@ -343,7 +381,7 @@ def consultar_publicaciones(
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
             # Prepara la consulta que reúne las reseñas con sus datos relacionados. Los valores de los filtros se envían por separado.
             sql = """
@@ -355,7 +393,6 @@ def consultar_publicaciones(
                     p.tipo,
                     p.contenido AS sinopsis,
                     p.imagen AS portada,
-                    p.destacada,
                     COALESCE(d.nombre, 'Sin información') AS director,
                     d.foto AS foto_director,
                     a.nombre AS actor,
@@ -382,27 +419,27 @@ def consultar_publicaciones(
             # Reúne los valores que se enviarán junto con la consulta.
             parametros = []
             if id_publicacion is not None:
-                # Añade los valores a la lista que se utilizará en los siguientes pasos.
+                # Agrega una condición al filtro de búsqueda.
                 condiciones.append("p.id_publicacion = %s")
-                # Añade los valores a la lista que se utilizará en los siguientes pasos.
+                # Añade el valor correspondiente al siguiente marcador %s de la consulta.
                 parametros.append(id_publicacion)
             if buscar.strip():
-                # Añade los valores a la lista que se utilizará en los siguientes pasos.
+                # Agrega una condición al filtro de búsqueda.
                 condiciones.append(
                     "(LOWER(p.titulo) LIKE LOWER(%s) "
                     "OR LOWER(d.nombre) LIKE LOWER(%s))"
                 )
                 texto = f"%{buscar.strip()}%"
-                # Añade los valores a la lista que se utilizará en los siguientes pasos.
+                # Agrega los dos textos que se usarán para buscar por título o director.
                 parametros.extend([texto, texto])
             if condiciones:
                 # Prepara la consulta que después se completará con los filtros necesarios.
                 sql += " WHERE " + " AND ".join(condiciones)
             # Prepara la consulta que después se completará con los filtros necesarios.
             sql += " ORDER BY p.id_publicacion DESC"
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(sql, tuple(parametros))
-            # Recupera todos los registros encontrados.
+            # fetchall reúne todas las filas que devolvió la consulta.
             publicaciones = cursor.fetchall()
             if not publicaciones:
                 return []
@@ -413,7 +450,7 @@ def consultar_publicaciones(
             ]
             # Prepara un espacio %s para cada identificador que se consultará; sus valores se envían por separado.
             espacios = ", ".join(["%s"] * len(ids))
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 f"""
                 SELECT
@@ -430,7 +467,7 @@ def consultar_publicaciones(
             # Agrupa las etiquetas según la reseña a la que pertenecen.
             etiquetas_por_publicacion = {}
             for etiqueta in cursor.fetchall():
-                # Añade los valores a la lista que se utilizará en los siguientes pasos.
+                # Agrega el valor a la lista que se enviará con la consulta.
                 etiquetas_por_publicacion.setdefault(
                     etiqueta["id_publicacion"],
                     [],
@@ -449,7 +486,7 @@ def consultar_publicaciones(
                     )
                 )
             return publicaciones
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -467,7 +504,7 @@ def obtener_publicacion(id_publicacion: int, request: Request):
         id_publicacion=id_publicacion,
     )
     if not publicaciones:
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=404,
             detail="La publicación no existe.",
@@ -479,9 +516,9 @@ def obtener_comentarios(id_publicacion: int):
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT
@@ -500,7 +537,7 @@ def obtener_comentarios(id_publicacion: int):
                 (id_publicacion,),
             )
             return cursor.fetchall()
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -513,9 +550,9 @@ def listar_directores(
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT
@@ -523,14 +560,14 @@ def listar_directores(
                     nombre,
                     COALESCE(
                         NULLIF(foto, ''),
-                        'default_director.jpg'
+                        ''
                     ) AS foto
                 FROM directores
                 ORDER BY id_director DESC
                 """
             )
             return cursor.fetchall()
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -547,7 +584,7 @@ def guardar_director(
     # Prepara el nombre que se utilizará en esta operación.
     nombre = nombre.strip()
     if not nombre or len(nombre) > 100:
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=422,
             detail="El nombre debe contener entre 1 y 100 caracteres.",
@@ -557,12 +594,12 @@ def guardar_director(
     # Guarda el nombre de la imagen nueva o None si todavía no se ha elegido una.
     nueva_foto = None
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
             # Conserva la referencia de la fotografía que ya tiene el registro.
-            foto_actual = "default_director.jpg"
+            foto_actual = ""
             if id_director is not None:
-                # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+                # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
                 cursor.execute(
                     """
                     SELECT foto
@@ -572,10 +609,10 @@ def guardar_director(
                     """,
                     (id_director,),
                 )
-                # Recupera el registro encontrado; si no existe, el resultado es None.
+                # fetchone obtiene una fila; None indica que no se encontró ninguna.
                 director = cursor.fetchone()
                 if director is None:
-                    # Interrumpe la operación y comunica el error.
+                    # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                     raise HTTPException(
                         status_code=404,
                         detail="El director no existe.",
@@ -586,13 +623,13 @@ def guardar_director(
             nueva_foto = guardar_foto(foto)
             nombre_foto = nueva_foto or foto_actual
             if not nombre_foto or nombre_foto == "default_director.jpg":
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=422,
                     detail="Selecciona una fotografía para el director.",
                 )
             if id_director is None:
-                # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+                # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
                 cursor.execute(
                     """
                     INSERT INTO directores (nombre, foto)
@@ -602,9 +639,9 @@ def guardar_director(
                 )
                 # Recupera el identificador que MySQL acaba de asignar al registro.
                 id_director = cursor.lastrowid
-            # Ejecuta esta alternativa cuando no se cumple la condición anterior.
+            # Si el archivo no coincide con los formatos anteriores, entra en esta alternativa.
             else:
-                # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+                # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
                 cursor.execute(
                     """
                     UPDATE directores
@@ -613,7 +650,7 @@ def guardar_director(
                     """,
                     (nombre, nombre_foto, id_director),
                 )
-        # Confirma los cambios para que queden guardados en MySQL.
+        # commit confirma los cambios pendientes de esta conexión en MySQL.
         conexion.commit()
         return {
             "mensaje": "Director guardado correctamente.",
@@ -623,16 +660,16 @@ def guardar_director(
                 "foto": nombre_foto,
             },
         }
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except Exception:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
         if nueva_foto:
             # Elimina el archivo indicado sin provocar otro error si ya no existe.
             (CARPETA_PORTADAS / nueva_foto).unlink(missing_ok=True)
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -662,30 +699,6 @@ def actualizar_director(
     return guardar_director(nombre, foto, id_director)
 # Nuevos modelos y funciones para actores.
 # Agrupa los campos que se reciben en una solicitud y sus reglas de validación.
-# Modelo conservado de la versión anterior: los endpoints actuales de este módulo reciben estos datos con Form y File.
-class DatosActor(BaseModel):
-    # Define el campo nombre con un límite de 150 caracteres.
-    nombre: str = Field(min_length=1, max_length=150)
-    # Define el campo foto con un límite de 2048 caracteres.
-    foto: str = Field(min_length=1, max_length=2048)
-# Comprueba el formato de una dirección web de fotografía. Esta función se conserva, aunque no se llama en este archivo.
-def validar_url_foto(foto: str):
-    try:
-        partes = urlparse(foto)
-        valida = (
-            partes.scheme.lower() in ("http", "https")
-            and bool(partes.hostname)
-            and not any(caracter.isspace() for caracter in foto)
-        )
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
-    except ValueError:
-        valida = False
-    if not valida:
-        # Interrumpe la operación y comunica el error.
-        raise HTTPException(
-            status_code=422,
-            detail="La fotografía debe ser una URL http o https válida.",
-        )
 @app.get("/api/admin/actores")
 # Devuelve los actores registrados y adapta sus fotografías para la app.
 def listar_actores(
@@ -697,9 +710,9 @@ def listar_actores(
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT id_actor, nombre, foto
@@ -707,12 +720,12 @@ def listar_actores(
                 ORDER BY id_actor DESC
                 """
             )
-            # Recupera todos los registros encontrados.
+            # fetchall reúne todas las filas que devolvió la consulta.
             actores = cursor.fetchall()
             for actor in actores:
                 actor["foto"] = foto_para_app(actor.get("foto"), request)
             return actores
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -730,7 +743,7 @@ def guardar_actor(
     # Prepara el nombre que se utilizará en esta operación.
     nombre = nombre.strip()
     if not nombre or len(nombre) > 150:
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=422,
             detail="El nombre debe contener entre 1 y 150 caracteres.",
@@ -740,20 +753,20 @@ def guardar_actor(
     # Guarda el nombre de la imagen nueva o None si todavía no se ha elegido una.
     nueva_foto = None
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
             # Conserva la referencia de la fotografía que ya tiene el registro.
             foto_actual = ""
             if id_actor is not None:
-                # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+                # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
                 cursor.execute(
                     "SELECT foto FROM actores WHERE id_actor = %s FOR UPDATE",
                     (id_actor,),
                 )
-                # Recupera el registro encontrado; si no existe, el resultado es None.
+                # fetchone obtiene una fila; None indica que no se encontró ninguna.
                 actor = cursor.fetchone()
                 if actor is None:
-                    # Interrumpe la operación y comunica el error.
+                    # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                     raise HTTPException(404, detail="El actor no existe.")
                 # Conserva la referencia de la fotografía que ya tiene el registro.
                 foto_actual = (actor["foto"] or "").strip()
@@ -763,38 +776,38 @@ def guardar_actor(
                 RUTA_FOTOS_API + nueva_foto if nueva_foto else foto_actual
             )
             if not nombre_foto:
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=422,
                     detail="Selecciona una fotografía para el actor.",
                 )
             if id_actor is None:
-                # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+                # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
                 cursor.execute(
                     "INSERT INTO actores (nombre, foto) VALUES (%s, %s)",
                     (nombre, nombre_foto),
                 )
                 # Recupera el identificador que MySQL acaba de asignar al registro.
                 id_actor = cursor.lastrowid
-            # Ejecuta esta alternativa cuando no se cumple la condición anterior.
+            # Si el archivo no coincide con los formatos anteriores, entra en esta alternativa.
             else:
-                # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+                # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
                 cursor.execute(
                     "UPDATE actores SET nombre = %s, foto = %s WHERE id_actor = %s",
                     (nombre, nombre_foto, id_actor),
                 )
-        # Confirma los cambios para que queden guardados en MySQL.
+        # commit confirma los cambios pendientes de esta conexión en MySQL.
         conexion.commit()
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except Exception:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
         if nueva_foto:
             # Elimina el archivo indicado sin provocar otro error si ya no existe.
             (CARPETA_PORTADAS / nueva_foto).unlink(missing_ok=True)
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -845,32 +858,32 @@ def eliminar_actor(
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 "DELETE FROM actores WHERE id_actor = %s",
                 (id_actor,),
             )
             if cursor.rowcount == 0:
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=404,
                     detail="El actor no existe.",
                 )
-        # Confirma los cambios para que queden guardados en MySQL.
+        # commit confirma los cambios pendientes de esta conexión en MySQL.
         conexion.commit()
         return {
             "mensaje": "Actor eliminado correctamente.",
             "id_actor": id_actor,
         }
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except Exception:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -897,7 +910,7 @@ def preparar_etiquetas(texto: str):
             # Omite este elemento y continúa con el siguiente.
             continue
         if len(nombre) > 60:
-            # Interrumpe la operación y comunica el error.
+            # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
             raise HTTPException(
                 status_code=422,
                 detail="Cada etiqueta admite hasta 60 caracteres.",
@@ -905,14 +918,16 @@ def preparar_etiquetas(texto: str):
         # Prepara el nombre de la etiqueta para compararlo sin distinguir mayúsculas de minúsculas.
         clave = nombre.casefold()
         if clave not in nombres_repetidos:
-            # Ejecuta esta operación auxiliar: nombres_repetidos.add(clave).
+            # Recuerda esta etiqueta para no agregarla dos veces.
             nombres_repetidos.add(clave)
-            # Añade los valores a la lista que se utilizará en los siguientes pasos.
+            # Agrega el valor a la lista que se enviará con la consulta.
             etiquetas.append(nombre)
     return etiquetas
 # Actualiza las relaciones entre una reseña y sus etiquetas, reutilizando las etiquetas existentes.
+# La tabla publicacion_etiqueta relaciona las reseñas con sus etiquetas.
+# ON DUPLICATE KEY UPDATE atiende una coincidencia con una clave única ya registrada.
 def guardar_etiquetas(cursor, id_publicacion: int, etiquetas: list):
-    # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+    # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
     cursor.execute(
         """
         DELETE FROM publicacion_etiqueta
@@ -921,7 +936,7 @@ def guardar_etiquetas(cursor, id_publicacion: int, etiquetas: list):
         (id_publicacion,),
     )
     for nombre in etiquetas:
-        # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+        # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
         cursor.execute(
             """
             INSERT INTO etiquetas (nombre)
@@ -930,7 +945,7 @@ def guardar_etiquetas(cursor, id_publicacion: int, etiquetas: list):
             """,
             (nombre,),
         )
-        # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+        # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
         cursor.execute(
             """
             SELECT id_etiqueta
@@ -939,9 +954,9 @@ def guardar_etiquetas(cursor, id_publicacion: int, etiquetas: list):
             """,
             (nombre,),
         )
-        # Recupera el registro encontrado; si no existe, el resultado es None.
+        # fetchone obtiene una fila; None indica que no se encontró ninguna.
         etiqueta = cursor.fetchone()
-        # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+        # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
         cursor.execute(
             """
             INSERT INTO publicacion_etiqueta (
@@ -956,6 +971,9 @@ def guardar_etiquetas(cursor, id_publicacion: int, etiquetas: list):
         )
 # Publica o actualiza una reseña dentro de una transacción.
 # Valida y guarda una reseña y sus etiquetas dentro de una transacción.
+# Form recibe campos del formulario; File recibe la imagen. Un ID identifica un registro.
+# FOR UPDATE bloquea las filas consultadas mientras termina la transacción.
+# commit y rollback requieren tablas con transacciones, como InnoDB.
 def guardar_resena(
     # Recibe el título de la película o serie.
     titulo: str,
@@ -967,8 +985,6 @@ def guardar_resena(
     sinopsis: str,
     # Recibe la imagen de portada enviada en el formulario.
     portada: UploadFile | None,
-    # Conserva el indicador de reseña destacada que también utiliza el proyecto web.
-    destacada: bool,
     # Identifica la reseña sobre la que se realiza la operación.
     id_publicacion: int | None = None,
     # Identifica al actor seleccionado o que se va a modificar.
@@ -979,31 +995,31 @@ def guardar_resena(
     titulo = titulo.strip()
     sinopsis = sinopsis.strip()
     if not titulo or len(titulo) > 255:
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=422,
             detail="El título debe contener entre 1 y 255 caracteres.",
         )
     if tipo not in ("Película", "Serie"):
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=422,
             detail="Selecciona Película o Serie.",
         )
     if not sinopsis:
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=422,
             detail="Escribe la sinopsis.",
         )
     if len(sinopsis.encode("utf-8")) > 65535:
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=422,
             detail="La sinopsis es demasiado extensa.",
         )
     if id_director <= 0:
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=422,
             detail="Selecciona un director registrado.",
@@ -1018,9 +1034,9 @@ def guardar_resena(
     # Guarda la referencia de la portada nueva para completar o deshacer la operación.
     nueva_portada = None
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT id_director, nombre
@@ -1030,16 +1046,16 @@ def guardar_resena(
                 """,
                 (id_director,),
             )
-            # Recupera el registro encontrado; si no existe, el resultado es None.
+            # fetchone obtiene una fila; None indica que no se encontró ninguna.
             director = cursor.fetchone()
             if director is None:
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=422,
                     detail="El director seleccionado ya no existe.",
                 )
             if id_actor is not None:
-                # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+                # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
                 cursor.execute(
                     """
                     SELECT id_actor
@@ -1050,28 +1066,15 @@ def guardar_resena(
                     (id_actor,),
                 )
                 if cursor.fetchone() is None:
-                    # Interrumpe la operación y comunica el error.
+                    # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                     raise HTTPException(
                         status_code=422,
                         detail="Selecciona un actor registrado.",
                     )
-            # Bloquea las reseñas antes de cambiar la destacada.
-            if destacada:
-                # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
-                cursor.execute(
-                    """
-                    SELECT id_publicacion
-                    FROM publicaciones
-                    ORDER BY id_publicacion
-                    FOR UPDATE
-                    """
-                )
-                # Ejecuta esta operación auxiliar: cursor.fetchall().
-                cursor.fetchall()
             # Conserva la portada existente si no se envía otra imagen.
-            portada_actual = "default_cover.jpg"
+            portada_actual = ""
             if id_publicacion is not None:
-                # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+                # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
                 cursor.execute(
                     """
                     SELECT imagen, id_actor
@@ -1081,10 +1084,10 @@ def guardar_resena(
                     """,
                     (id_publicacion,),
                 )
-                # Recupera el registro encontrado; si no existe, el resultado es None.
+                # fetchone obtiene una fila; None indica que no se encontró ninguna.
                 publicacion = cursor.fetchone()
                 if publicacion is None:
-                    # Interrumpe la operación y comunica el error.
+                    # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                     raise HTTPException(
                         status_code=404,
                         detail="La reseña no existe.",
@@ -1102,21 +1105,15 @@ def guardar_resena(
                 prefijo="pub",
             )
             nombre_portada = nueva_portada or portada_actual
-            if destacada:
-                # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
-                cursor.execute(
-                    "UPDATE publicaciones SET destacada = %s",
-                    (0,),
-                )
             if id_publicacion is None:
-                # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+                # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
                 cursor.execute(
                     """
                     INSERT INTO publicaciones (
                         titulo, tipo, id_director, id_actor,
-                        contenido, imagen, destacada
+                        contenido, imagen
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s)
                     """,
                     (
                         titulo,
@@ -1125,14 +1122,13 @@ def guardar_resena(
                         id_actor,
                         sinopsis,
                         nombre_portada,
-                        int(destacada),
                     ),
                 )
                 # Recupera el identificador que MySQL acaba de asignar al registro.
                 id_publicacion = cursor.lastrowid
-            # Ejecuta esta alternativa cuando no se cumple la condición anterior.
+            # Si el archivo no coincide con los formatos anteriores, entra en esta alternativa.
             else:
-                # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+                # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
                 cursor.execute(
                     """
                     UPDATE publicaciones
@@ -1142,8 +1138,7 @@ def guardar_resena(
                         id_director = %s,
                         id_actor = %s,
                         contenido = %s,
-                        imagen = %s,
-                        destacada = %s
+                        imagen = %s
                     WHERE id_publicacion = %s
                     """,
                     (
@@ -1153,19 +1148,18 @@ def guardar_resena(
                         id_actor,
                         sinopsis,
                         nombre_portada,
-                        int(destacada),
                         id_publicacion,
                     ),
                 )
             # Si el campo no se envía, conserva las etiquetas existentes.
             if etiquetas_preparadas is not None:
-                # Ejecuta esta operación auxiliar: guardar_etiquetas(cursor, id_publicacion, etiquetas_preparadas).
+                # Guarda las etiquetas y su relación con esta reseña.
                 guardar_etiquetas(
                     cursor,
                     id_publicacion,
                     etiquetas_preparadas,
                 )
-        # Confirma los cambios para que queden guardados en MySQL.
+        # commit confirma los cambios pendientes de esta conexión en MySQL.
         conexion.commit()
         return {
             "mensaje": "Reseña guardada correctamente.",
@@ -1178,21 +1172,20 @@ def guardar_resena(
                 "sinopsis": sinopsis,
                 "portada": nombre_portada,
                 "director": director["nombre"],
-                "destacada": int(destacada),
             },
         }
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except Exception:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
         if nueva_portada:
             # Elimina el archivo indicado sin provocar otro error si ya no existe.
             (CARPETA_PORTADAS / nueva_portada).unlink(
                 missing_ok=True
             )
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -1209,8 +1202,6 @@ def publicar_resena(
     sinopsis: str = Form(...),
     # Recibe la imagen de portada enviada en el formulario.
     portada: UploadFile | None = File(default=None),
-    # Conserva el indicador de reseña destacada que también utiliza el proyecto web.
-    destacada: bool = Form(False),
     # Identifica al actor seleccionado o que se va a modificar.
     id_actor: int | None = Form(default=None),
     # Recibe las etiquetas que se asociarán con la publicación.
@@ -1224,7 +1215,6 @@ def publicar_resena(
         id_director,
         sinopsis,
         portada,
-        destacada,
         id_actor=id_actor,
         etiquetas=etiquetas,
     )
@@ -1243,8 +1233,6 @@ def actualizar_resena(
     sinopsis: str = Form(...),
     # Recibe la imagen de portada enviada en el formulario.
     portada: UploadFile | None = File(default=None),
-    # Conserva el indicador de reseña destacada que también utiliza el proyecto web.
-    destacada: bool = Form(False),
     # Identifica al actor seleccionado o que se va a modificar.
     id_actor: int | None = Form(default=None),
     # Recibe las etiquetas que se asociarán con la publicación.
@@ -1258,7 +1246,6 @@ def actualizar_resena(
         id_director,
         sinopsis,
         portada,
-        destacada,
         id_publicacion,
         id_actor=id_actor,
         etiquetas=etiquetas,
@@ -1274,9 +1261,9 @@ def eliminar_resena(
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT id_publicacion
@@ -1287,36 +1274,36 @@ def eliminar_resena(
                 (id_publicacion,),
             )
             if cursor.fetchone() is None:
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=404,
                     detail="La reseña no existe.",
                 )
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 "DELETE FROM comentarios WHERE id_publicacion = %s",
                 (id_publicacion,),
             )
             comentarios_eliminados = cursor.rowcount
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 "DELETE FROM publicaciones WHERE id_publicacion = %s",
                 (id_publicacion,),
             )
-        # Confirma los cambios para que queden guardados en MySQL.
+        # commit confirma los cambios pendientes de esta conexión en MySQL.
         conexion.commit()
         return {
             "mensaje": "Reseña y comentarios eliminados correctamente.",
             "id_publicacion": id_publicacion,
             "comentarios_eliminados": comentarios_eliminados,
         }
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except Exception:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -1330,9 +1317,9 @@ def listar_comentarios_admin(
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT
@@ -1353,7 +1340,7 @@ def listar_comentarios_admin(
                 """
             )
             return cursor.fetchall()
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -1369,9 +1356,9 @@ def eliminar_comentario_admin(
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 DELETE FROM comentarios
@@ -1380,24 +1367,24 @@ def eliminar_comentario_admin(
                 (id_comentario,),
             )
             if cursor.rowcount == 0:
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=404,
                     detail="El comentario ya no existe.",
                 )
-        # Confirma los cambios para que queden guardados en MySQL.
+        # commit confirma los cambios pendientes de esta conexión en MySQL.
         conexion.commit()
         return {
             "mensaje": "Comentario eliminado correctamente.",
             "id_comentario": id_comentario,
         }
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except Exception:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -1411,9 +1398,9 @@ def listar_usuarios(
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT
@@ -1426,7 +1413,7 @@ def listar_usuarios(
                 """
             )
             return cursor.fetchall()
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -1443,7 +1430,7 @@ def eliminar_usuario(
         id_usuario == 1
         or id_usuario == int(administrador["id_usuario"])
     ):
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=403,
             detail="No puedes eliminar la cuenta del administrador.",
@@ -1451,9 +1438,9 @@ def eliminar_usuario(
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT id_usuario, rol
@@ -1463,22 +1450,22 @@ def eliminar_usuario(
                 """,
                 (id_usuario,),
             )
-            # Recupera el registro encontrado; si no existe, el resultado es None.
+            # fetchone obtiene una fila; None indica que no se encontró ninguna.
             usuario = cursor.fetchone()
             if usuario is None:
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=404,
                     detail="El usuario ya no existe.",
                 )
             if usuario["rol"] != "Lector":
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=403,
                     detail="Solo puedes eliminar cuentas de lectores.",
                 )
-            # Conserva tu comprobación de comentarios.
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Comprueba si el lector tiene comentarios antes de permitir eliminar su cuenta.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT id_comentario
@@ -1489,7 +1476,7 @@ def eliminar_usuario(
                 (id_usuario,),
             )
             if cursor.fetchone() is not None:
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=409,
                     detail=(
@@ -1498,7 +1485,7 @@ def eliminar_usuario(
                         "su cuenta."
                     ),
                 )
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 DELETE FROM usuarios
@@ -1506,17 +1493,17 @@ def eliminar_usuario(
                 """,
                 (id_usuario,),
             )
-        # Confirma los cambios para que queden guardados en MySQL.
+        # commit confirma los cambios pendientes de esta conexión en MySQL.
         conexion.commit()
         return {
             "mensaje": "Usuario eliminado correctamente.",
             "id_usuario": id_usuario,
         }
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except pymysql.err.IntegrityError:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=409,
             detail=(
@@ -1524,13 +1511,13 @@ def eliminar_usuario(
                 "otros registros asociados."
             ),
         )
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except Exception:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -1554,20 +1541,20 @@ def registrar_lector(datos: DatosRegistro):
     nombre = datos.nombre.strip()
     correo = datos.correo.strip()
     if not nombre:
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=422,
             detail="Escribe tu nombre.",
         )
     # Validación básica del formato del correo.
     if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", correo):
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=422,
             detail="Escribe un correo electrónico válido.",
         )
     if datos.password != datos.confirm_password:
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=422,
             detail="Las contraseñas no coinciden.",
@@ -1575,13 +1562,13 @@ def registrar_lector(datos: DatosRegistro):
     # Convierte la contraseña a bytes para revisar el tamaño que admite bcrypt.
     password_bytes = datos.password.encode("utf-8")
     if len(password_bytes) > 72:
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=422,
             detail="La contraseña admite un máximo de 72 bytes.",
         )
     if b"\x00" in password_bytes:
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=422,
             detail="La contraseña contiene un carácter no permitido.",
@@ -1589,9 +1576,9 @@ def registrar_lector(datos: DatosRegistro):
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT id_usuario
@@ -1602,7 +1589,7 @@ def registrar_lector(datos: DatosRegistro):
                 (correo,),
             )
             if cursor.fetchone() is not None:
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=409,
                     detail="El correo electrónico ya está registrado.",
@@ -1614,7 +1601,7 @@ def registrar_lector(datos: DatosRegistro):
                 bcrypt.gensalt(rounds=12),
             ).decode("utf-8")
             # El rol se asigna en el servidor.
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 INSERT INTO usuarios (
@@ -1634,7 +1621,7 @@ def registrar_lector(datos: DatosRegistro):
             )
             # Recupera el identificador que MySQL acaba de asignar al registro.
             id_usuario = cursor.lastrowid
-        # Confirma los cambios para que queden guardados en MySQL.
+        # commit confirma los cambios pendientes de esta conexión en MySQL.
         conexion.commit()
         return {
             "mensaje": "Cuenta creada correctamente. Inicia sesión.",
@@ -1645,25 +1632,25 @@ def registrar_lector(datos: DatosRegistro):
                 "rol": "Lector",
             },
         }
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except pymysql.err.IntegrityError as error:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
         if error.args[0] == 1062:
-            # Interrumpe la operación y comunica el error.
+            # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
             raise HTTPException(
                 status_code=409,
                 detail="El correo electrónico ya está registrado.",
             )
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except Exception:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -1697,13 +1684,13 @@ def publicar_comentario(
         "\U0001F47D",  # Alien
     }
     if not texto:
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=422,
             detail="Escribe un comentario antes de publicarlo.",
         )
     if datos.emoji not in emojis_permitidos:
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=422,
             detail="Selecciona una de las reacciones disponibles.",
@@ -1713,9 +1700,9 @@ def publicar_comentario(
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT id_publicacion
@@ -1726,12 +1713,12 @@ def publicar_comentario(
                 (id_publicacion,),
             )
             if cursor.fetchone() is None:
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=404,
                     detail="La publicación ya no existe.",
                 )
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 INSERT INTO comentarios (
@@ -1750,19 +1737,19 @@ def publicar_comentario(
             )
             # Recupera el identificador que MySQL acaba de asignar al registro.
             id_comentario = cursor.lastrowid
-        # Confirma los cambios para que queden guardados en MySQL.
+        # commit confirma los cambios pendientes de esta conexión en MySQL.
         conexion.commit()
         return {
             "mensaje": "Comentario publicado correctamente.",
             "id_comentario": id_comentario,
         }
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except Exception:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -1777,9 +1764,9 @@ def eliminar_comentario_propio(
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT id_usuario
@@ -1789,10 +1776,10 @@ def eliminar_comentario_propio(
                 """,
                 (id_comentario,),
             )
-            # Recupera el registro encontrado; si no existe, el resultado es None.
+            # fetchone obtiene una fila; None indica que no se encontró ninguna.
             comentario = cursor.fetchone()
             if comentario is None:
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=404,
                     detail="El comentario ya no existe.",
@@ -1801,12 +1788,12 @@ def eliminar_comentario_propio(
                 int(comentario["id_usuario"])
                 != int(lector["id_usuario"])
             ):
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=403,
                     detail="Solo puedes eliminar tus propios comentarios.",
                 )
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 DELETE FROM comentarios
@@ -1815,35 +1802,24 @@ def eliminar_comentario_propio(
                 """,
                 (id_comentario, lector["id_usuario"]),
             )
-        # Confirma los cambios para que queden guardados en MySQL.
+        # commit confirma los cambios pendientes de esta conexión en MySQL.
         conexion.commit()
         return {
             "mensaje": "Comentario eliminado correctamente.",
             "id_comentario": id_comentario,
         }
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except Exception:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
 # Nuevas funciones para consultar y actualizar el perfil.
 # Agrupa los campos que se reciben en una solicitud y sus reglas de validación.
-# Modelo conservado de la versión anterior: los endpoints actuales de este módulo reciben estos datos con Form y File.
-class DatosPerfil(BaseModel):
-    model_config = {"extra": "forbid"}
-    # Define el campo nombre con un límite de 100 caracteres.
-    nombre: str = Field(min_length=1, max_length=100)
-    # Define el campo correo con un límite de 254 caracteres.
-    correo: str = Field(min_length=1, max_length=254)
-    # Define el campo foto con un límite de 255 caracteres.
-    foto: str | None = Field(default=None, max_length=255)
-    # Recibe la contraseña; su tamaño en bytes se revisa antes de guardarla.
-    password: str | None = Field(default=None, max_length=4096)
 @app.get("/api/perfil")
 # Consulta el perfil de la cuenta autenticada, sin devolver su contraseña ni su hash.
 def obtener_perfil(
@@ -1855,9 +1831,9 @@ def obtener_perfil(
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT id_usuario, nombre, correo, rol, foto
@@ -1866,17 +1842,17 @@ def obtener_perfil(
                 """,
                 (usuario["id_usuario"],),
             )
-            # Recupera el registro encontrado; si no existe, el resultado es None.
+            # fetchone obtiene una fila; None indica que no se encontró ninguna.
             perfil = cursor.fetchone()
             if perfil is None:
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=404,
                     detail="La cuenta no existe.",
                 )
             perfil["foto"] = foto_para_app(perfil.get("foto"), request)
             return perfil
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -1902,13 +1878,13 @@ def actualizar_perfil(
     nombre = nombre.strip()
     correo = correo.strip()
     if not nombre:
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=422,
             detail="El nombre no puede estar vacío.",
         )
     if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", correo):
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=422,
             detail="Escribe un correo electrónico válido.",
@@ -1919,13 +1895,13 @@ def actualizar_perfil(
         # Convierte la contraseña a bytes para revisar el tamaño que admite bcrypt.
         password_bytes = password.encode("utf-8")
         if len(password_bytes) > 72:
-            # Interrumpe la operación y comunica el error.
+            # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
             raise HTTPException(
                 status_code=422,
                 detail="La contraseña admite un máximo de 72 bytes.",
             )
         if b"\x00" in password_bytes:
-            # Interrumpe la operación y comunica el error.
+            # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
             raise HTTPException(
                 status_code=422,
                 detail="La contraseña contiene un carácter no permitido.",
@@ -1940,9 +1916,9 @@ def actualizar_perfil(
     # Guarda el nombre de la imagen nueva o None si todavía no se ha elegido una.
     nueva_foto = None
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT id_usuario
@@ -1954,18 +1930,18 @@ def actualizar_perfil(
                 (correo, usuario["id_usuario"]),
             )
             if cursor.fetchone() is not None:
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=409,
                     detail="Ese correo ya pertenece a otra cuenta.",
                 )
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 "SELECT id_usuario FROM usuarios WHERE id_usuario = %s FOR UPDATE",
                 (usuario["id_usuario"],),
             )
             if cursor.fetchone() is None:
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(404, detail="La cuenta no existe.")
             # Guarda el nombre de la imagen nueva o None si todavía no se ha elegido una.
             nueva_foto = guardar_foto(foto, prefijo="perfil")
@@ -1974,27 +1950,27 @@ def actualizar_perfil(
             # Reúne los valores que se enviarán junto con la consulta.
             parametros = [nombre, correo]
             if nueva_foto or quitar_foto:
-                # Añade los valores a la lista que se utilizará en los siguientes pasos.
+                # Añade este campo a la lista de columnas que se actualizarán.
                 cambios.append("foto = %s")
-                # Añade los valores a la lista que se utilizará en los siguientes pasos.
+                # Añade el valor correspondiente al siguiente marcador %s de la consulta.
                 parametros.append(
                     RUTA_FOTOS_API + nueva_foto if nueva_foto else None
                 )
             if password_hash is not None:
-                # Añade los valores a la lista que se utilizará en los siguientes pasos.
+                # Añade este campo a la lista de columnas que se actualizarán.
                 cambios.append("password = %s")
-                # Añade los valores a la lista que se utilizará en los siguientes pasos.
+                # Añade el valor correspondiente al siguiente marcador %s de la consulta.
                 parametros.append(password_hash)
-            # Añade los valores a la lista que se utilizará en los siguientes pasos.
+            # Añade el valor correspondiente al siguiente marcador %s de la consulta.
             parametros.append(usuario["id_usuario"])
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 "UPDATE usuarios SET "
                 + ", ".join(cambios)
                 + " WHERE id_usuario = %s",
                 tuple(parametros),
             )
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT id_usuario, nombre, correo, rol, foto
@@ -2003,44 +1979,45 @@ def actualizar_perfil(
                 """,
                 (usuario["id_usuario"],),
             )
-            # Recupera el registro encontrado; si no existe, el resultado es None.
+            # fetchone obtiene una fila; None indica que no se encontró ninguna.
             perfil = cursor.fetchone()
-        # Confirma los cambios para que queden guardados en MySQL.
+        # commit confirma los cambios pendientes de esta conexión en MySQL.
         conexion.commit()
         perfil["foto"] = foto_para_app(perfil.get("foto"), request)
         return {
             "mensaje": "Perfil actualizado correctamente.",
             "usuario": perfil,
         }
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except pymysql.err.IntegrityError as error:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
         if nueva_foto:
             # Elimina el archivo indicado sin provocar otro error si ya no existe.
             (CARPETA_PORTADAS / nueva_foto).unlink(missing_ok=True)
         if error.args[0] == 1062:
-            # Interrumpe la operación y comunica el error.
+            # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
             raise HTTPException(
                 status_code=409,
                 detail="Ese correo ya pertenece a otra cuenta.",
             )
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except Exception:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
         if nueva_foto:
             # Elimina el archivo indicado sin provocar otro error si ya no existe.
             (CARPETA_PORTADAS / nueva_foto).unlink(missing_ok=True)
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
 # Agrupa los campos que se reciben en una solicitud y sus reglas de validación.
+# strict exige un entero; ge=1 y le=5 fijan el intervalo permitido de estrellas.
 class DatosCalificacion(BaseModel):
     model_config = {"extra": "forbid"}
     # Acepta únicamente un número entero entre 1 y 5.
@@ -2054,7 +2031,7 @@ def consultar_calificacion(
     # Identifica la cuenta de usuario.
     id_usuario: int,
 ):
-    # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+    # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
     cursor.execute(
         """
         SELECT
@@ -2065,9 +2042,9 @@ def consultar_calificacion(
         """,
         (id_publicacion,),
     )
-    # Recupera el registro encontrado; si no existe, el resultado es None.
+    # fetchone obtiene una fila; None indica que no se encontró ninguna.
     resumen = cursor.fetchone()
-    # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+    # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
     cursor.execute(
         """
         SELECT estrellas
@@ -2077,7 +2054,7 @@ def consultar_calificacion(
         """,
         (id_publicacion, id_usuario),
     )
-    # Recupera el registro encontrado; si no existe, el resultado es None.
+    # fetchone obtiene una fila; None indica que no se encontró ninguna.
     voto = cursor.fetchone()
     return {
         "id_publicacion": id_publicacion,
@@ -2096,9 +2073,9 @@ def obtener_calificaciones(
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT id_publicacion
@@ -2108,7 +2085,7 @@ def obtener_calificaciones(
                 (id_publicacion,),
             )
             if cursor.fetchone() is None:
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=404,
                     detail="La publicación no existe.",
@@ -2118,12 +2095,14 @@ def obtener_calificaciones(
                 id_publicacion,
                 usuario["id_usuario"],
             )
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
 @app.post("/api/publicaciones/{id_publicacion}/calificaciones")
 # Guarda o actualiza el voto del lector: la restricción única de la base permite un voto por cuenta y reseña.
+# Para mantener un voto por lector y reseña, la base necesita una clave única
+# que combine id_usuario e id_publicacion; la instrucción SQL actualiza el voto existente.
 def guardar_calificacion(
     # Identifica la reseña sobre la que se realiza la operación.
     id_publicacion: int,
@@ -2135,9 +2114,9 @@ def guardar_calificacion(
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT id_publicacion
@@ -2148,12 +2127,12 @@ def guardar_calificacion(
                 (id_publicacion,),
             )
             if cursor.fetchone() is None:
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=404,
                     detail="La publicación no existe.",
                 )
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 INSERT INTO calificaciones (
@@ -2177,19 +2156,19 @@ def guardar_calificacion(
                 id_publicacion,
                 lector["id_usuario"],
             )
-        # Confirma los cambios para que queden guardados en MySQL.
+        # commit confirma los cambios pendientes de esta conexión en MySQL.
         conexion.commit()
         return {
             "mensaje": "Calificación guardada correctamente.",
             **resultado,
         }
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except Exception:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
@@ -2204,9 +2183,9 @@ def eliminar_director(
     # Abre la conexión que se utilizará en esta operación.
     conexion = conectar()
     try:
-        # Prepara el cursor para ejecutar las consultas y lo cierra al salir de este bloque.
+        # El cursor ejecuta las consultas y recoge sus resultados; with lo cierra al terminar el bloque.
         with conexion.cursor() as cursor:
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 SELECT id_director
@@ -2217,13 +2196,13 @@ def eliminar_director(
                 (id_director,),
             )
             if cursor.fetchone() is None:
-                # Interrumpe la operación y comunica el error.
+                # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
                 raise HTTPException(
                     status_code=404,
                     detail="El director ya no existe.",
                 )
             # Conserva las reseñas antes de borrar al director.
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 UPDATE publicaciones
@@ -2232,7 +2211,7 @@ def eliminar_director(
                 """,
                 (id_director,),
             )
-            # Ejecuta la consulta enviando los valores por separado de la instrucción SQL.
+            # Ejecuta la consulta. Los valores se envían por separado para los marcadores %s del SQL.
             cursor.execute(
                 """
                 DELETE FROM directores
@@ -2240,17 +2219,17 @@ def eliminar_director(
                 """,
                 (id_director,),
             )
-        # Confirma los cambios para que queden guardados en MySQL.
+        # commit confirma los cambios pendientes de esta conexión en MySQL.
         conexion.commit()
         return {
             "mensaje": "Director eliminado correctamente.",
             "id_director": id_director,
         }
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except pymysql.err.IntegrityError:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise HTTPException(
             status_code=409,
             detail=(
@@ -2258,13 +2237,13 @@ def eliminar_director(
                 "la base de datos impide desvincular sus reseñas."
             ),
         )
-    # Atiende este error para informar del problema y deshacer cambios cuando sea necesario.
+    # Atiende este tipo de error y ejecuta las instrucciones del bloque except.
     except Exception:
-        # Deshace los cambios que todavía no se habían confirmado.
+        # rollback deshace los cambios pendientes de esta transacción; no borra operaciones ya confirmadas.
         conexion.rollback()
-        # Interrumpe la operación y comunica el error.
+        # Detiene esta solicitud y devuelve el aviso indicado; no continúa con los pasos siguientes.
         raise
-    # Este paso se realiza al terminar, aunque haya ocurrido un error.
+    # finally se ejecuta al salir de este bloque, incluso si ocurre un error o se devuelve un resultado.
     finally:
         # Cierra la conexión con la base de datos al terminar.
         conexion.close()
