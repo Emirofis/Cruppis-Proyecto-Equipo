@@ -1,12 +1,23 @@
 // CRUPPIS — Registro de cuentas de lectores.
 // Revisa los campos, envía la solicitud y devuelve el correo al login cuando se crea la cuenta.
 // La API también valida los datos, comprueba el correo duplicado y asigna el rol Lector.
-
+// StatefulWidget permite actualizar la pantalla; State conserva sus datos actuales.
+// Future representa un resultado pendiente; async y await permiten esperar sin bloquear la interfaz.
+// final impide reasignar la variable; const permite crear valores constantes.
+// GlobalKey permite acceder al Form para ejecutar los validadores de sus campos.
+// setState solicita actualizar la interfaz; mounted comprueba si la pantalla sigue activa.
+// JSON es el formato utilizado para enviar y recibir datos; UTF-8 conserva acentos y otros caracteres.
+// try intenta una operación, catch atiende el error y finally retira el estado de carga.
+// null indica ausencia de valor; ?? utiliza la alternativa cuando falta el primero.
+// condición ? opción : otraOpción elige entre dos valores; onPressed: null desactiva un botón.
+// ! afirma que un valor no es nulo; en currentState se utiliza porque el Form ya está construido.
+// bcrypt es el método que usa el backend para guardar el hash de la contraseña.
+// Un byte es una unidad de almacenamiento: un carácter puede ocupar varios bytes en UTF-8.
 // Permite enviar las credenciales como JSON y leer la respuesta de la API.
 import 'dart:convert';
 // Incluye los componentes de la pantalla, los formularios y la navegación.
 import 'package:flutter/material.dart';
-// Permite enviar la solicitud de inicio de sesión a la API.
+// Permite enviar la solicitud de registro a la API.
 import 'package:http/http.dart' as http;
 // Pantalla donde una persona crea su cuenta de lector.
 class RegistroPage extends StatefulWidget {
@@ -77,7 +88,7 @@ class _RegistroPageState extends State<RegistroPage> {
           // Envía las credenciales mediante una solicitud POST.
           .post(
             // Dirección del registro en la API. Debe actualizarse si cambia la IPv4 de la computadora.
-            Uri.parse('http://192.168.1.65:8000/api/registro'),
+            Uri.parse('http://10.13.40.223:8000/api/registro'),
             // Encabezados que acompañan la petición HTTP.
             headers: {
               // Indica al servidor que el cuerpo de la solicitud contiene JSON.
@@ -114,13 +125,13 @@ class _RegistroPageState extends State<RegistroPage> {
           );
           // Comprueba que la respuesta tenga un mensaje detail de tipo texto antes de leerlo.
           if (datos is Map && datos['detail'] is String) {
-            // Utiliza el mensaje de la API, por ejemplo cuando el correo ya está registrado.
+            // Lee la explicación que devuelve la API, como el aviso de un correo ya registrado.
             mensaje = datos['detail'] as String;
           }
         // Atiende problemas de conexión o respuestas que no se pudieron interpretar.
         } catch (_) {
         }
-        // Comprueba que el login siga abierto antes de actualizar su contenido.
+        // Comprueba que la pantalla de registro siga activa antes de cambiar sus datos.
         if (mounted) {
           // Actualiza los valores y refleja el cambio en la pantalla.
           setState(() {
@@ -131,7 +142,7 @@ class _RegistroPageState extends State<RegistroPage> {
       }
     // Atiende problemas de conexión o respuestas que no se pudieron interpretar.
     } catch (_) {
-      // Comprueba que el login siga abierto antes de actualizar su contenido.
+      // Comprueba que la pantalla de registro siga activa antes de cambiar sus datos.
       if (mounted) {
         // Actualiza los valores y refleja el cambio en la pantalla.
         setState(() {
@@ -142,7 +153,7 @@ class _RegistroPageState extends State<RegistroPage> {
       }
     // Finaliza el estado de carga tanto si se creó la cuenta como si ocurrió un error.
     } finally {
-      // Comprueba que el login siga abierto antes de actualizar su contenido.
+      // Comprueba que la pantalla de registro siga activa antes de cambiar sus datos.
       if (mounted) {
         // Actualiza los valores y refleja el cambio en la pantalla.
         setState(() {
@@ -225,11 +236,11 @@ class _RegistroPageState extends State<RegistroPage> {
                     maxLength: 100,
                     // Sugiere comenzar cada palabra del nombre con mayúscula; no cambia por sí solo el texto escrito.
                     textCapitalization: TextCapitalization.words,
-                    // Muestra la acción de finalizar en el teclado.
+                    // Muestra la acción para pasar al siguiente campo del formulario.
                     textInputAction: TextInputAction.next,
-                    // Aplica el fondo, el borde y la sombra definidos en los estilos compartidos.
+                    // Configura la etiqueta y el borde del campo utilizando el tema de la aplicación.
                     decoration: const InputDecoration(
-                      // Etiqueta que identifica el campo del nombre.
+                      // Etiqueta que identifica el dato solicitado en este campo.
                       labelText: 'Nombre completo',
                       // Define el borde del campo.
                       border: OutlineInputBorder(),
@@ -250,22 +261,25 @@ class _RegistroPageState extends State<RegistroPage> {
                     // Limita la longitud del campo según lo que admite la cuenta.
                     maxLength: 254,
                     keyboardType: TextInputType.emailAddress,
-                    // Muestra la acción de finalizar en el teclado.
+                    // Muestra la acción para pasar al siguiente campo del formulario.
                     textInputAction: TextInputAction.next,
                     autocorrect: false,
                     enableSuggestions: false,
-                    // Aplica el fondo, el borde y la sombra definidos en los estilos compartidos.
+                    // Configura la etiqueta y el borde del campo utilizando el tema de la aplicación.
                     decoration: const InputDecoration(
-                      // Etiqueta que identifica el campo del nombre.
+                      // Etiqueta que identifica el dato solicitado en este campo.
                       labelText: 'Correo electrónico',
                       // Define el borde del campo.
                       border: OutlineInputBorder(),
                     ),
                     // Revisa el campo y muestra una explicación si el valor no es válido.
                     validator: (valor) {
-                      // Prepara el correo para comprobar que no esté vacío y que incluya una arroba.
+                      // Quita espacios exteriores antes de comprobar el formato del correo.
                       final correo = (valor ?? '').trim();
-                      // Comprueba el formato básico del correo antes de enviarlo.
+                      // RegExp describe el formato que debe cumplir el correo.
+                      // r conserva las barras del patrón; ^ y $ señalan el inicio y el final.
+                      // [^@\s]+ exige texto sin arrobas ni espacios en esa parte.
+                      // \. representa un punto literal entre el dominio y su terminación.
                       if (!RegExp(
                         r'^[^@\s]+@[^@\s]+\.[^@\s]+$',
                       // Si el correo no coincide con ese formato, muestra el mensaje de validación.
@@ -286,13 +300,13 @@ class _RegistroPageState extends State<RegistroPage> {
                     obscureText: _ocultarPassword,
                     autocorrect: false,
                     enableSuggestions: false,
-                    // Muestra la acción de finalizar en el teclado.
+                    // Muestra la acción para pasar al siguiente campo del formulario.
                     textInputAction: TextInputAction.next,
                     // Revisa el campo y muestra una explicación si el valor no es válido.
                     validator: _validarPassword,
-                    // Aplica el fondo, el borde y la sombra definidos en los estilos compartidos.
+                    // Configura la etiqueta y el borde del campo utilizando el tema de la aplicación.
                     decoration: InputDecoration(
-                      // Etiqueta que identifica el campo del nombre.
+                      // Etiqueta que identifica el dato solicitado en este campo.
                       labelText: 'Contraseña',
                       // Aclara el límite de tamaño permitido para la contraseña.
                       helperText: 'Máximo 72 bytes.',
@@ -340,9 +354,9 @@ class _RegistroPageState extends State<RegistroPage> {
                       // Intenta crear la cuenta al pulsar la acción de finalizar del teclado.
                       _registrar();
                     },
-                    // Aplica el fondo, el borde y la sombra definidos en los estilos compartidos.
+                    // Configura la etiqueta y el borde del campo utilizando el tema de la aplicación.
                     decoration: InputDecoration(
-                      // Etiqueta que identifica el campo del nombre.
+                      // Etiqueta que identifica el dato solicitado en este campo.
                       labelText: 'Confirmar contraseña',
                       // Define el borde del campo.
                       border: const OutlineInputBorder(),
