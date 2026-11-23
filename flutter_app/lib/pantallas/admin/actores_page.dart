@@ -1,12 +1,17 @@
 // CRUPPIS — Administración de actores.
-// Incluye dos pantallas: la lista pública dentro del módulo y su formulario privado.
+// Incluye el listado administrativo de actores y su formulario de registro o edición.
 // Solo el backend decide si el token pertenece a un administrador autorizado.
 // GET consulta, POST registra, PUT modifica y DELETE elimina.
 // async/await permite esperar operaciones sin bloquear la interfaz.
 // Future representa un resultado que llegará después; mounted indica si el widget sigue activo.
 // El prefijo _ hace privado un nombre dentro de la biblioteca Dart de este archivo.
+// StatefulWidget es una pantalla cuyo contenido cambia; State almacena esos cambios.
+// setState avisa a Flutter de que debe volver a dibujar la interfaz con los nuevos datos.
+// JSON es el formato de texto que utiliza la API para enviar datos; UTF-8 conserva acentos.
+// MultipartRequest envía el nombre y la fotografía juntos en una petición.
+// Form y GlobalKey permiten comprobar los campos antes de enviarlos.
+// null representa ausencia de valor; un botón con onPressed: null queda desactivado.
 // Los cierres ), ], }; y } terminan las instrucciones y bloques anteriores.
-
 // Permite convertir las respuestas JSON a datos de Dart y decodificar el texto UTF-8.
 import 'dart:convert';
 // Permite mostrar un archivo de imagen del teléfono. Este archivo está pensado para la app móvil, no para Flutter web.
@@ -20,35 +25,60 @@ import 'package:image_picker/image_picker.dart';
 // Importa los estilos compartidos de Cruppis; se conserva el nombre del archivo por compatibilidad.
 import '../../estilos/spooky_tema.dart';
 // Dirección actual del backend. Si cambia la IPv4 de la computadora, hay que actualizarla antes de generar otro APK.
-const String _servidorActores = 'http://192.168.1.65:8000';
-// Convierte el valor recibido como fotografía en una dirección que Image.network pueda utilizar.
+const String _servidorActores = 'http://10.13.40.223:8000';
+// Construye la dirección de una foto guardada en backend/uploads.
+// No acepta imágenes alojadas en páginas externas.
 String _urlFotoActor(Object? valor) {
-  // Sustituye un valor nulo por texto vacío, lo convierte a String y retira espacios de los extremos.
+  // ?? utiliza texto vacío cuando no hay una foto; no crea una imagen de prueba.
   final foto = (valor ?? '').toString().trim();
-  // Si no hay fotografía, devuelve una dirección vacía; la tarjeta dispone de un icono de respaldo.
   if (foto.isEmpty) return '';
-  // Intenta interpretar el texto como una URI; devuelve null si no se puede analizar.
+
+  // Uri separa una dirección en protocolo, servidor, puerto y ruta.
+  final base = Uri.parse(_servidorActores);
   final uri = Uri.tryParse(foto);
-  // Comprueba si se pudo interpretar la dirección y si utiliza HTTP o HTTPS.
-  if (uri != null &&
-      // Acepta direcciones completas tanto HTTP como HTTPS; esto no comprueba que la imagen exista.
-      (uri.scheme == 'http' || uri.scheme == 'https')) {
-    // Conserva la dirección completa que ya proporcionó el servidor.
-    return foto;
+  if (uri == null) return '';
+
+  String ruta;
+  if (uri.hasScheme) {
+    // Una dirección completa debe pertenecer a nuestro backend.
+    // Las fotos de uploads se consultan públicamente mediante /portadas/.
+    if (uri.scheme != base.scheme ||
+        uri.host != base.host ||
+        uri.port != base.port ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasQuery ||
+        uri.hasFragment ||
+        !uri.path.startsWith('/portadas/')) {
+      return '';
+    }
+    ruta = uri.path;
+  } else {
+    ruta = foto;
   }
-  // Reconoce las rutas de fotografías que ya incluyen el directorio portadas.
-  if (foto.startsWith('/portadas/') ||
-      // También acepta esa ruta aunque no tenga una barra inicial.
-      foto.startsWith('portadas/')) {
-    // Resuelve la ruta relativa utilizando la dirección de la API como base.
-    return Uri.parse('$_servidorActores/').resolve(foto).toString();
+
+  // Retira el prefijo local para conservar únicamente el nombre del archivo.
+  String nombre = ruta;
+  for (final prefijo in ['/portadas/', 'portadas/']) {
+    if (ruta.startsWith(prefijo)) {
+      nombre = ruta.substring(prefijo.length);
+      break;
+    }
   }
-  // Si se recibió únicamente un nombre de archivo, construye su dirección dentro de /portadas.
-  return Uri.parse(_servidorActores).replace(
-    // Añade los componentes de la ruta y deja que Uri codifique los caracteres que lo necesiten.
-    pathSegments: ['portadas', foto],
-  ).toString();
+
+  // Rechaza nombres vacíos y rutas hacia otras carpetas.
+  if (nombre.isEmpty ||
+      nombre == '.' ||
+      nombre == '..' ||
+      nombre.contains('/') ||
+      nombre.contains(String.fromCharCode(92)) ||
+      nombre.contains(':')) {
+    return '';
+  }
+
+  // replace construye la ruta; pathSegments codifica el nombre del archivo.
+  return base.replace(pathSegments: ['portadas', nombre]).toString();
 }
+
 // Obtiene un mensaje legible a partir de una respuesta de error de la API.
 String _errorActores(http.Response respuesta) {
   // Reconoce que el servidor no autorizó la sesión; por ejemplo, porque el token venció.
@@ -65,7 +95,7 @@ String _errorActores(http.Response respuesta) {
       // Devuelve el mensaje enviado por FastAPI.
       return datos['detail'] as String;
     }
-  // Captura el fallo sin utilizar el objeto de excepción; muestra un mensaje apropiado para esta operación.
+  // catch atiende el error. El símbolo _ indica que no se necesita leer la excepción.
   } catch (_) {
     // Utiliza el mensaje general.
   }
@@ -136,7 +166,7 @@ class _ActoresPageState extends State<ActoresPage> {
     return datos
         // Convierte cada actor a un mapa para consultar campos como id_actor, nombre y foto.
         .map((actor) => Map<String, dynamic>.from(actor as Map))
-        // Materializa los elementos transformados en una lista de Dart.
+        // Reúne los actores convertidos en una lista que puede mostrar la pantalla.
         .toList();
   }
   // Solicita nuevamente la lista de actores.
@@ -160,7 +190,7 @@ class _ActoresPageState extends State<ActoresPage> {
     try {
       // Mantiene el indicador de actualización hasta que la consulta termina.
       await consulta;
-    // Captura el fallo sin utilizar el objeto de excepción; muestra un mensaje apropiado para esta operación.
+    // catch atiende el error. El símbolo _ indica que no se necesita leer la excepción.
     } catch (_) {
       // El FutureBuilder muestra el error y permite reintentar.
     }
@@ -286,7 +316,7 @@ class _ActoresPageState extends State<ActoresPage> {
           ),
         ),
       );
-    // Captura el fallo sin utilizar el objeto de excepción; muestra un mensaje apropiado para esta operación.
+    // catch atiende el error. El símbolo _ indica que no se necesita leer la excepción.
     } catch (_) {
       // Evita actualizar la interfaz si el widget se cerró mientras se esperaba una operación.
       if (!mounted) return;
@@ -650,7 +680,7 @@ class _FormularioActorPageState extends State<_FormularioActorPage> {
   bool get _editando => widget.actor != null;
   // Getter que comprueba si el actor recibido ya tiene una referencia de fotografía.
   bool get _tieneFotoActual =>
-      (widget.actor?['foto'] ?? '').toString().trim().isNotEmpty;
+      _urlFotoActor(widget.actor?['foto']).isNotEmpty;
   // Indica que se está implementando un método definido por la clase de Flutter.
   @override
   // Se ejecuta una vez cuando se crea el estado del widget.
@@ -709,7 +739,7 @@ class _FormularioActorPageState extends State<_FormularioActorPage> {
         // Conserva el archivo elegido para mostrarlo y enviarlo después.
         _fotoSeleccionada = seleccion;
       });
-    // Captura el fallo sin utilizar el objeto de excepción; muestra un mensaje apropiado para esta operación.
+    // catch atiende el error. El símbolo _ indica que no se necesita leer la excepción.
     } catch (_) {
       // Evita actualizar la interfaz si el widget se cerró mientras se esperaba una operación.
       if (!mounted) return;
@@ -892,7 +922,7 @@ class _FormularioActorPageState extends State<_FormularioActorPage> {
         // Marca que la API confirmó el guardado.
         guardado = true;
       }
-    // Captura el fallo sin utilizar el objeto de excepción; muestra un mensaje apropiado para esta operación.
+    // catch atiende el error. El símbolo _ indica que no se necesita leer la excepción.
     } catch (_) {
       // Evita actualizar la interfaz si el widget se cerró mientras se esperaba una operación.
       if (!mounted) return;
@@ -1005,7 +1035,7 @@ class _FormularioActorPageState extends State<_FormularioActorPage> {
                     // Ejecuta las validaciones y solicita guardar el formulario.
                     _guardar();
                   },
-                  // Aplica el fondo, el borde y la sombra definidos en los estilos compartidos.
+                  // Configura la etiqueta y el borde del campo; utiliza el tema compartido.
                   decoration: const InputDecoration(
                     // Etiqueta que identifica el campo del nombre.
                     labelText: 'Nombre del actor',
